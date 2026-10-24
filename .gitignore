@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+dist/
+log.txt
+.DS_Store
+*.swp
+*.swo
+
+# Development preview screenshots (except official screenshot/cover)
+preview_*.png
+dashboard_*.png
+tv_*.png
+splash_preview.png
+songo5_screenshot.png
+backups/
+scratch/
