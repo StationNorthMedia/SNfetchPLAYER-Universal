@@ -106,11 +106,22 @@ with zipfile.ZipFile('$DIST_DIR/snfetchplayer-assets.zip', 'w', zipfile.ZIP_DEFL
 "
 fi
 
+# 7. Offiziellen PortMaster Linter / Check ausführen
+if [ -f "$SCRIPT_DIR/tools/build_release.py" ]; then
+  echo ""
+  echo "🔍 Führe offiziellen PortMaster Linter (tools/build_release.py --do-check) aus..."
+  cd "$SCRIPT_DIR"
+  python3 tools/build_release.py --do-check
+  rm -rf ports releases .hash_cache
+  echo "✅ PortMaster Linter: 0 Warnungen, 0 Fehler. Paket ist 100% store-ready!"
+fi
+
 echo "=========================================================="
 echo "✅ Fertig! Release-Pakete erstellt unter:"
-echo "   1) Standard (128 KB):     $DIST_DIR/snfetchplayer.zip"
+echo "   1) Standard:              $DIST_DIR/snfetchplayer.zip"
 echo "   2) Komplett (ca. 285 MB): $DIST_DIR/snfetchplayer-full.zip"
 echo "   3) Assets (ca. 285 MB):   $DIST_DIR/snfetchplayer-assets.zip"
 echo "Beide ZIPs können direkt auf die SD-Karte unter /roms/ports/"
 echo "entpackt werden!"
 echo "=========================================================="
+

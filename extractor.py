@@ -28,13 +28,13 @@ def _fetch_player_data(payload: dict, headers: dict, timeout: int = 8) -> Option
         for k, v in headers.items():
             header_args.extend(["-H", f"{k}: {v}"])
         cmd = [
-            "curl", "-s", "--max-time", str(timeout),
+            "curl", "-s", "-L", "--compressed", "--connect-timeout", "6", "--max-time", str(max(timeout, 12)),
             "-X", "POST",
             *header_args,
             "-d", json.dumps(payload),
             PLAYER_ENDPOINT
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 1)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=max(timeout, 12) + 2)
         if res.returncode == 0 and res.stdout:
             return json.loads(res.stdout)
     except Exception as e:

@@ -1,18 +1,19 @@
-# 👑 Station North SNfetchPLAYER • dArkOS & ArkOS Edition
+# 👑 Station North SNfetchPLAYER • Universal PortMaster Edition
 
 <p align="center">
   <img src="sn_logo.png" alt="Station North Logo" width="340" />
 </p>
 
 <p align="center">
-  <b>The Sovereign Cyberdeck & Retro Media Suite for Handheld Gaming Consoles</b><br>
-  <i>Tailored specifically for 4:3 Handhelds (XiFan XF-45V, R36S Max 2, R36S, R35S, RK3326) running dArkOS & ArkOS</i>
+  <b>The Sovereign Cyberdeck & Retro Media Suite for Handheld Linux Gaming Consoles</b><br>
+  <i>Officially packaged for PortMaster: Compatible with muOS, ROCKNIX, ArkOS, AmberELEC, Knulli / Batocera & classic 4:3 Handhelds (XiFan XF-45V, R36S, Anbernic RG35XX/RG40XX, TrimUI, Powkiddy, RK3326/RK3566)</i>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v7.0.0-88C0D0?style=for-the-badge&logo=github&logoColor=white" alt="v7.0.0" />
-  <img src="https://img.shields.io/badge/Hardware-XiFan%20XF--45V%20%7C%20R36S-81A1C1?style=for-the-badge&logo=linux&logoColor=white" alt="XF-45V & R36S" />
-  <img src="https://img.shields.io/badge/Display-4%3A3%20Native%201024x768%20KMSDRM-A3BE8C?style=for-the-badge" alt="4:3 1024x768 KMSDRM" />
+  <img src="https://img.shields.io/badge/PortMaster-Ready-00B4D8?style=for-the-badge&logo=linux&logoColor=white" alt="PortMaster Ready" />
+  <img src="https://img.shields.io/badge/Runtime-Python%203.11%20%2F%20Pygame-A3BE8C?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11 Runtime" />
+  <img src="https://img.shields.io/badge/CFW-muOS%20%7C%20ROCKNIX%20%7C%20ArkOS%20%7C%20Knulli-88C0D0?style=for-the-badge" alt="CFWs" />
+  <img src="https://img.shields.io/badge/Display-4%3A3%20Native%201024x768%20KMSDRM-EBCB8B?style=for-the-badge" alt="4:3 1024x768 KMSDRM" />
   <a href="https://github.com/StationNorthMedia/SNfetchPLAYER"><img src="https://img.shields.io/badge/Android%20Companion-SNfetchPLAYER-D08770?style=for-the-badge&logo=android&logoColor=white" alt="Android Companion" /></a>
   <img src="https://img.shields.io/badge/Vibe-The%20Queen's%20Frequency-B48EAD?style=for-the-badge" alt="The Queen" />
 </p>
@@ -35,13 +36,15 @@
   <img src="assets/backgrounds/bg_02_studio_manjaro.webp" width="100%" alt="Rainy Station Cyberdeck Banner" />
 </p>
 
-## 💡 Design Philosophy: Built for Authentic 4:3 Retro Handhelds
+## 💡 Design Philosophy: Universal PortMaster Architecture
 
-Station North was designed for **the XiFan XF-45V (R36S Max 2 clone)**, the **R36S**, and compatible classic **RK3326 retro handhelds** featuring authentic 4:3 displays.  
-The core vision: **turn your handheld into a dedicated, late-night Cyberdeck** — streaming lofi frequencies, voiced lore comics, and authentic 4:3 CRT video broadcasts directly on your desk or nightstand.
+Station North was designed to turn your retro gaming handheld into a **dedicated late-night Cyberdeck** — streaming curated lofi frequencies, voiced lore comics, and authentic 4:3 CRT video broadcasts directly on your desk or nightstand.
 
+- **Universal PortMaster Compatibility**: Built to run self-contained on minimal buildroot distributions (**muOS, ROCKNIX, AmberELEC, Knulli**) as well as Debian-based systems (**ArkOS, dArkOS**).
+- **Official PortMaster Runtime (`python_3.11`)**: Uses PortMaster's shared `python_3.11.squashfs` runtime via Harbourmaster, ensuring zero dependency bloat and no need for OS-level `apt` or package managers.
+- **Zero-Dependency Native Input (`LinuxGamepadReader`)**: Interacts directly with Linux input devices via `/dev/input/event*` using Python's standard library `struct` and `select` — eliminating any external `evdev` C-module compilation issues across differing Linux kernels.
+- **Self-Contained Streaming (`extractor.py`)**: Resolves YouTube InnerTube streams with zero desktop browser overhead using native system `curl` (leveraging system TLS) with a clean `urllib.request` fallback.
 - **Authentic 4:3 CRT Aesthetic**: Video broadcasts, lower-third banners, and UI elements are specifically cropped and framed for 4:3, delivering a nostalgic vintage television broadcast experience.
-- **Native Hardware Performance**: Built for Debian Linux under dArkOS & ArkOS. Runs at silky 60 FPS directly via Linux KMSDRM DirectFB (`/dev/dri/card0`) and native ALSA audio with zero desktop overhead or emulated runtime lag.
 - **Dedicated Dual Mode**: Seamlessly switch between the live 40-band audio spectrum analyzer (Radio Mode) and 4:3 full-screen broadcast videos (TV Mode).
 - **The Chronicles Lore Engine**: Full illustrated audio comic reader with synchronized Queen voiceover narration, chapter headlines, and panel indexing.
 
@@ -91,26 +94,35 @@ Configured for native dArkOS / ArkOS gamepads with hardware debounce:
   <img src="assets/backgrounds/bg_05_dj_booth.webp" width="100%" alt="DJ Booth Installation Banner" />
 </p>
 
-## 📦 Installation on dArkOS / ArkOS
+## 📦 Installation (PortMaster & All CFWs)
 
-Two installation packages are available in [GitHub Releases](https://github.com/StationNorthMedia/SNfetchPLAYER-PortMaster/releases/latest):
+Station North SNfetchPLAYER is officially formatted for PortMaster across all supported Linux handheld firmware distributions (**muOS, ROCKNIX, ArkOS, AmberELEC, Knulli / Batocera**).
 
-### Option 1: Lightweight Online Package (`snfetchplayer.zip` ~829 KB)
+### Method 1: PortMaster GUI (Recommended)
+1. Open **PortMaster** on your handheld console.
+2. Navigate to **All Ports** or search for **Station North**.
+3. Select **Station North SNfetchPLAYER** and click **Install**.
+4. PortMaster automatically downloads the package and verifies the shared `python_3.11` runtime.
+
+### Method 2: Manual Installation via GitHub Releases
+Two installation packages are available in [GitHub Releases](https://github.com/StationNorthMedia/SNfetchPLAYER-Universal/releases/latest):
+
+#### Option A: Lightweight Store Package (`snfetchplayer.zip` ~830 KB)
 *Recommended for Wi-Fi enabled handhelds.*
 1. Download `snfetchplayer.zip`.
-2. Extract the archive into your SD card's `ports/` directory:
+2. Extract the archive into your SD card's ports directory (e.g. `/roms/ports/` on ArkOS/muOS or corresponding CFW ports folder):
    ```text
-   /roms/ports/
+   ports/
    ├── SNfetchPLAYER.sh
    └── snfetchplayer/
    ```
 3. Boot your device, connect to Wi-Fi, and launch **Station North SNfetchPLAYER** from the **Ports** menu.
-4. On first launch, the built-in **High-Speed Asset Downloader** will automatically download and unpack the media bundle (jingles, TV idents, comics).
+4. On first launch, the built-in **High-Speed Asset Downloader** in the splash screen automatically downloads and unpacks the media bundle (jingles, TV idents, comics).
 
-### Option 2: Full Offline Bundle (`snfetchplayer-full.zip` ~285 MB)
+#### Option B: Full Offline Bundle (`snfetchplayer-full.zip` ~285 MB)
 *Recommended for offline devices or zero-setup plug-and-play.*
 1. Download `snfetchplayer-full.zip`.
-2. Extract directly to `/roms/ports/` on your SD card.
+2. Extract directly to your ports folder (`/roms/ports/` on SD card).
 3. Plug in and enjoy all 98 voiced comic panels, Queen Faith narrations, and radio station jingles pre-installed with zero downloads!
 
 > [!IMPORTANT]

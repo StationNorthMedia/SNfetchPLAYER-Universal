@@ -20,3 +20,6 @@ splash_preview.png
 songo5_screenshot.png
 backups/
 scratch/
+ports/
+releases/
+.hash_cache

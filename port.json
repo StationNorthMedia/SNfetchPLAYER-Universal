@@ -28,7 +28,9 @@
     },
     "rtr": true,
     "exp": false,
-    "runtime": [],
+    "runtime": [
+      "python_3.11"
+    ],
     "store": [],
     "availability": "full",
     "reqs": [
@@ -38,14 +40,5 @@
       "aarch64"
     ],
     "min_glibc": ""
-  },
-  "status": {
-    "source": "PortMaster",
-    "status": "Installed"
-  },
-  "files": {
-    "port.json": "snfetchplayer/port.json",
-    "SNfetchPLAYER.sh": "SNfetchPLAYER.sh",
-    "snfetchplayer/": "snfetchplayer/"
   }
 }

@@ -411,7 +411,7 @@ class IntegratedVisualizer:
         dt = now - self.last_update
         self.last_update = now
 
-        # Use real FFT if audio was fed within last 0.35s
+        # 1. Real FFT spectrum (active when raw PCM chunk was fed within last 0.35s)
         if is_active and self.has_real_audio and (now - self.last_audio_feed) < 0.35:
             for i in range(self.num_bars):
                 # Snappy attack, smooth decay
@@ -419,10 +419,55 @@ class IntegratedVisualizer:
                     self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 26.0)
                 else:
                     self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 11.0)
+        elif is_active:
+            # 2. Dynamic Procedural Rhythmic Spectrum (when playing via mpv/native sink without PCM tap)
+            self._update_procedural(now, dt)
         else:
-            # Idle gentle decay
+            # 3. Idle gentle decay to baseline (14.0 px)
             for i in range(self.num_bars):
                 self.heights[i] += (14.0 - self.heights[i]) * min(1.0, dt * 6.0)
+
+    def _update_procedural(self, now: float, dt: float):
+        # Base tempo: ~124 BPM (2.066 Hz)
+        tempo = 2.066
+        phase = now * tempo * 2.0 * math.pi
+        
+        # Beat pulses: primary kick on beat, snare on offbeat
+        beat_kick = max(0.0, math.sin(phase)) ** 3.0
+        beat_snare = max(0.0, math.sin(phase + math.pi * 0.5)) ** 4.0
+        
+        for i in range(self.num_bars):
+            norm_i = i / float(self.num_bars)
+            
+            # Bass wave (bars 0-10)
+            if norm_i < 0.25:
+                # Strong punch on beat_kick + low bass oscillation
+                wave = beat_kick * 0.85 + 0.15 * math.sin(now * 3.7 + i * 0.4)
+                target = 25.0 + 175.0 * max(0.0, wave)
+            # Low-mid wave (bars 10-20)
+            elif norm_i < 0.50:
+                wave = beat_snare * 0.65 + 0.35 * math.sin(now * 5.2 + i * 0.3)
+                target = 20.0 + 150.0 * max(0.0, wave)
+            # High-mid wave (bars 20-30)
+            elif norm_i < 0.75:
+                wave = 0.5 * math.sin(now * 7.1 + i * 0.5) + 0.3 * math.cos(now * 4.3 - i * 0.2) + 0.2 * beat_kick
+                target = 18.0 + 130.0 * max(0.0, wave)
+            # Treble wave (bars 30-39)
+            else:
+                # Fast hi-hat / cymbal shimmer
+                wave = 0.45 * math.sin(now * 11.3 + i * 0.7) + 0.35 * math.sin(now * 17.1 + i * 0.9) + 0.2 * beat_snare
+                target = 16.0 + 110.0 * max(0.0, wave)
+            
+            # Subtle pseudo-random micro-jitter based on bar index & time
+            jitter = (math.sin(now * 19.7 + i * 13.3) * 0.5 + 0.5) * 15.0
+            target = max(14.0, min(210.0, target + jitter))
+            
+            # Responsive attack / decay
+            if target > self.heights[i]:
+                self.heights[i] += (target - self.heights[i]) * min(1.0, dt * 22.0)
+            else:
+                self.heights[i] += (target - self.heights[i]) * min(1.0, dt * 10.0)
+
 
     def draw(self, surface: pygame.Surface, x: int, y: int, width: int, max_h: int = 220):
         bar_gap = 7
@@ -1733,6 +1778,8 @@ class SNfetchDashboard:
                         pass
 
     def _audio_spectrum_reader(self, proc: subprocess.Popen):
+        if not proc or not proc.stdout:
+            return
         chunk_size = 2048  # 1024 16-bit mono samples (~46ms @ 22.05kHz)
         chunk_duration = 1024.0 / 22050.0
         
@@ -1785,21 +1832,31 @@ class SNfetchDashboard:
                     self.current_idx = idx
                     self.cursor_idx = idx
 
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", str(jingle_path),
-                        "-filter_complex", "[0:a]asplit=2[out1][out2]",
-                        "-map", "[out1]", *self.audio_sink_args,
-                        "-map", "[out2]", "-flush_packets", "1", "-f", "s16le", "-ac", "1", "-ar", "22050", "-"
-                    ]
+                    if shutil.which("ffmpeg"):
+                        cmd = [
+                            "ffmpeg", "-y",
+                            "-i", str(jingle_path),
+                            "-filter_complex", "[0:a]asplit=2[out1][out2]",
+                            "-map", "[out1]", *self.audio_sink_args,
+                            "-map", "[out2]", "-flush_packets", "1", "-f", "s16le", "-ac", "1", "-ar", "22050", "-"
+                        ]
+                        stdout_mode = subprocess.PIPE
+                    elif shutil.which("mpv"):
+                        cmd = ["mpv", "--no-video", "--no-terminal", "--audio-fallback-to-null=yes", str(jingle_path)]
+                        stdout_mode = subprocess.DEVNULL
+                    else:
+                        cmd = ["aplay", "-q", str(jingle_path)]
+                        stdout_mode = subprocess.DEVNULL
+
                     with self._audio_lock:
                         if self.state != STATE_RADIO or self._resolve_id != req_id:
                             return
-                        self.audio_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                        self.audio_proc = subprocess.Popen(cmd, stdout=stdout_mode, stderr=subprocess.DEVNULL)
                         self.is_playing = True
                     self.playback_start_time = time.time()
                     self.track_duration = 12.0
-                    threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc,), daemon=True).start()
+                    if stdout_mode == subprocess.PIPE:
+                        threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc,), daemon=True).start()
                     
                     proc = self.audio_proc
                     if proc:
@@ -1855,19 +1912,28 @@ class SNfetchDashboard:
                 self.cursor_idx = idx
                 self._update_quote()
 
-                reconnect_args = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"] if str(stream_url).startswith("http") else []
-                cmd = [
-                    "ffmpeg", "-y",
-                    *reconnect_args,
-                    "-i", stream_url,
-                    "-filter_complex", "[0:a]asplit=2[out1][out2]",
-                    "-map", "[out1]", *self.audio_sink_args,
-                    "-map", "[out2]", "-flush_packets", "1", "-f", "s16le", "-ac", "1", "-ar", "22050", "-"
-                ]
+                if shutil.which("ffmpeg"):
+                    reconnect_args = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"] if str(stream_url).startswith("http") else []
+                    cmd = [
+                        "ffmpeg", "-y",
+                        *reconnect_args,
+                        "-i", stream_url,
+                        "-filter_complex", "[0:a]asplit=2[out1][out2]",
+                        "-map", "[out1]", *self.audio_sink_args,
+                        "-map", "[out2]", "-flush_packets", "1", "-f", "s16le", "-ac", "1", "-ar", "22050", "-"
+                    ]
+                    stdout_mode = subprocess.PIPE
+                elif shutil.which("mpv"):
+                    cmd = ["mpv", "--no-video", "--no-terminal", "--audio-fallback-to-null=yes", stream_url]
+                    stdout_mode = subprocess.DEVNULL
+                else:
+                    cmd = ["aplay", "-q", stream_url]
+                    stdout_mode = subprocess.DEVNULL
+
                 with self._audio_lock:
                     if self.state != STATE_RADIO or self._resolve_id != req_id:
                         return
-                    self.audio_proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    self.audio_proc = subprocess.Popen(cmd, stdout=stdout_mode, stderr=subprocess.DEVNULL)
                     self.is_playing = True
                     self._trigger_prefetch_next_track(idx, is_tv=False)
                 self.playback_start_time = time.time()
@@ -1875,7 +1941,8 @@ class SNfetchDashboard:
                     self.track_duration = float(duration) if duration and float(duration) > 0 else 210.0
                 except (ValueError, TypeError):
                     self.track_duration = 210.0
-                threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc,), daemon=True).start()
+                if stdout_mode == subprocess.PIPE:
+                    threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc,), daemon=True).start()
         except Exception as e:
             print(f"Playback error: {e}")
         finally:
@@ -1883,18 +1950,6 @@ class SNfetchDashboard:
                 self.is_resolving = False
 
     # --- VIDEO CONTROLS (TV MODE: 4:3 DISPLAY FILL & FLOATING OSD) ---
-    def _get_input_devices(self):
-        devices = []
-        try:
-            import evdev
-            for p in evdev.list_devices():
-                try:
-                    devices.append(evdev.InputDevice(p))
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        return devices
 
     def generate_tv_overlay_image(self, track: Dict[str, str], output_path: str = "/tmp/tv_ui_overlay.png") -> str:
         overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -1970,10 +2025,6 @@ class SNfetchDashboard:
         show_osd_this_track = manual_trigger
 
         import select
-        try:
-            import evdev
-        except ImportError:
-            evdev = None
 
         while True:
             if curr_idx < 0 or curr_idx >= len(self.playlist):
@@ -2067,13 +2118,45 @@ class SNfetchDashboard:
                 return
 
             if player_bin == "mpv":
-                cmd = ["mpv", "--fs", "--no-terminal", f"--title=STATION NORTH • {track_artist} - {track_title}", stream_url]
+                cmd = [
+                    "mpv",
+                    "--fullscreen",
+                    "--geometry=1024x768",
+                    "--vo=wlshm",
+                    "--hwdec=no",
+                    "--audio-fallback-to-null=yes",
+                    "--keep-open=no",
+                    "--force-window=yes",
+                    f"--sub-file={osd_file}",
+                    f"--title=STATION NORTH • {track_artist} - {track_title}",
+                ]
+                if Path(logo_path).exists():
+                    safe_logo = logo_path.replace(":", "\\:").replace("\\", "/")
+                    lavfi_filter = (
+                        f"[vid1]scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768[main]; "
+                        f"movie={safe_logo},scale=175:-1,format=rgba,colorchannelmixer=aa=0.65[logo]; "
+                        f"[main][logo]overlay=main_w-overlay_w-30:main_h-overlay_h-26[vo]"
+                    )
+                    cmd.append(f"--lavfi-complex={lavfi_filter}")
+                cmd.append(stream_url)
 
             try:
                 pygame.display.quit()
                 play_start_time = time.time()
-                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+                env = os.environ.copy()
+                env["WAYLAND_DISPLAY"] = env.get("WAYLAND_DISPLAY", "wayland-1")
+                env["XDG_RUNTIME_DIR"] = env.get("XDG_RUNTIME_DIR", "/var/run/0-runtime-dir")
+                env["SWAYSOCK"] = env.get("SWAYSOCK", "/var/run/0-runtime-dir/sway-ipc.0.sock")
+                proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
                 self._trigger_prefetch_next_track(curr_idx, is_tv=True)
+
+                def _sway_focus():
+                    time.sleep(0.15)
+                    for _ in range(5):
+                        subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True)
+                        subprocess.run(["swaymsg", '[class="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True)
+                        time.sleep(0.2)
+                threading.Thread(target=_sway_focus, daemon=True).start()
             except Exception as e:
                 logging.error(f"Failed to launch video player: {e}")
                 if not pygame.display.get_init():
@@ -2229,7 +2312,26 @@ class SNfetchDashboard:
             return True
 
         if player_bin == "mpv":
-            cmd = ["mpv", "--fs", "--no-terminal", "--title=STATION NORTH TV IDENT", str(clip_path)]
+            cmd = [
+                "mpv",
+                "--fullscreen",
+                "--geometry=1024x768",
+                "--vo=wlshm",
+                "--hwdec=no",
+                "--audio-fallback-to-null=yes",
+                "--keep-open=no",
+                "--force-window=yes",
+                "--title=STATION NORTH TV IDENT",
+            ]
+            if Path(logo_path).exists():
+                safe_logo = logo_path.replace(":", "\\:").replace("\\", "/")
+                lavfi_filter = (
+                    f"[vid1]scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768[main]; "
+                    f"movie={safe_logo},scale=175:-1,format=rgba,colorchannelmixer=aa=0.65[logo]; "
+                    f"[main][logo]overlay=main_w-overlay_w-30:main_h-overlay_h-26[vo]"
+                )
+                cmd.append(f"--lavfi-complex={lavfi_filter}")
+            cmd.append(str(clip_path))
         else:
             cmd = [
                 "ffplay",
@@ -2244,7 +2346,18 @@ class SNfetchDashboard:
 
         try:
             pygame.display.quit()
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+            env = os.environ.copy()
+            env["WAYLAND_DISPLAY"] = env.get("WAYLAND_DISPLAY", "wayland-1")
+            env["XDG_RUNTIME_DIR"] = env.get("XDG_RUNTIME_DIR", "/var/run/0-runtime-dir")
+            env["SWAYSOCK"] = env.get("SWAYSOCK", "/var/run/0-runtime-dir/sway-ipc.0.sock")
+            proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
+
+            def _sway_focus_id():
+                time.sleep(0.15)
+                for _ in range(5):
+                    subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True)
+                    time.sleep(0.2)
+            threading.Thread(target=_sway_focus_id, daemon=True).start()
         except Exception as e:
             logging.error(f"Failed to play TV ID: {e}")
             if not pygame.display.get_init():
@@ -2299,6 +2412,11 @@ class SNfetchDashboard:
             proc = self.chronicles_proc
             self.chronicles_proc = None
             self.chronicles_playing = False
+            try:
+                if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
+                    pygame.mixer.music.stop()
+            except Exception:
+                pass
             if proc and proc.poll() is None:
                 try:
                     proc.terminate()
@@ -2333,17 +2451,20 @@ class SNfetchDashboard:
         if target_path:
             self.stop_chronicles_audio()
             try:
-                player = "ffplay" if shutil.which("ffplay") else ("aplay" if shutil.which("aplay") else None)
-                if player == "ffplay":
+                if pygame.mixer.get_init():
+                    pygame.mixer.music.load(str(target_path))
+                    pygame.mixer.music.play()
+                    self.chronicles_playing = True
+                elif shutil.which("mpv"):
+                    cmd = ["mpv", "--no-video", "--really-quiet", "--no-terminal", str(target_path)]
+                    self.chronicles_proc = subprocess.Popen(cmd)
+                    self.chronicles_playing = True
+                elif shutil.which("ffplay"):
                     cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", str(target_path)]
                     self.chronicles_proc = subprocess.Popen(cmd)
                     self.chronicles_playing = True
-                elif player == "aplay":
-                    cmd = ["aplay", "-q", str(target_path)]
-                    self.chronicles_proc = subprocess.Popen(cmd)
-                    self.chronicles_playing = True
             except Exception as sub_err:
-                logging.error(f"Narration subprocess error: {sub_err}")
+                logging.error(f"Narration playback error: {sub_err}")
         else:
             logging.warning(f"Voiceover audio file '{audio_name}' not found. Please sync media assets in Settings.")
 
@@ -3947,7 +4068,7 @@ class SNfetchDashboard:
         running = True
 
         while running:
-            self.clock.tick(60)
+            self.clock.tick(30)
 
             # Auto-Advance in Radio Mode (shielded while jingle plays or resolver runs)
             if (self.state == STATE_RADIO and self.audio_proc and 
