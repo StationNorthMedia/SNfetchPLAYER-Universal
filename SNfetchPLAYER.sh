@@ -105,6 +105,14 @@ for c in /sys/bus/usb/devices/*/power/control; do
   echo on > "$c" 2>/dev/null || true
 done
 
+# USB-Kabel Internet-Routing (wenn Handheld per USB am PC hängt)
+if ip link show gadget >/dev/null 2>&1; then
+  ip route replace default via 169.254.170.1 dev gadget 2>/dev/null || true
+  if ! grep -q "1.1.1.1" /etc/resolv.conf 2>/dev/null; then
+    echo "nameserver 1.1.1.1" > /etc/resolv.conf 2>/dev/null || true
+  fi
+fi
+
 export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/var/run/0-runtime-dir}"
 export SWAYSOCK="${SWAYSOCK:-/var/run/0-runtime-dir/sway-ipc.0.sock}"

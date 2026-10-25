@@ -45,10 +45,15 @@ def generate_osd_ass(
         f"Style: TitleStyle, DejaVu Sans, 26, {COLOR_NORD6_SNOW}, &H00000000, {COLOR_NORD2_BORDER}, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 5, 2, 1, 36, 10, 62, 1",
         # 3. Artist: Schöne Schrift (19pt)
         f"Style: ArtistStyle, DejaVu Sans, 19, {COLOR_NORD8_CYAN}, &H00000000, {COLOR_NORD2_BORDER}, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 4, 2, 1, 36, 10, 32, 1",
+        # 4. Station Logo / Watermark (unten rechts, dezent transluzent)
+        f"Style: WatermarkStyle, DejaVu Sans, 18, &H66ECEFF4, &H00000000, &H552E3440, &H00000000, 1, 0, 0, 0, 100, 100, 0, 0, 1, 1, 0, 3, 10, 32, 28, 1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
     ]
+
+    # Permanenter dezenter TV-Sender-Watermark unten rechts (Hardware-beschleunigt via libass)
+    ass_lines.append(f"Dialogue: 0,0:00:00.00,9:59:59.00,WatermarkStyle,,0,0,0,,{{\\fad(400,0)}}STATION NORTH  ●  TV")
 
     if show_osd and track:
         title = track.get("title", "Unknown Title").replace("{", "(").replace("}", ")")

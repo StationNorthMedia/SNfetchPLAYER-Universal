@@ -2122,23 +2122,13 @@ class SNfetchDashboard:
                     "mpv",
                     "--fullscreen",
                     "--geometry=1024x768",
-                    "--vo=wlshm",
-                    "--hwdec=no",
                     "--audio-fallback-to-null=yes",
                     "--keep-open=no",
                     "--force-window=yes",
                     f"--sub-file={osd_file}",
                     f"--title=STATION NORTH • {track_artist} - {track_title}",
+                    stream_url,
                 ]
-                if Path(logo_path).exists():
-                    safe_logo = logo_path.replace(":", "\\:").replace("\\", "/")
-                    lavfi_filter = (
-                        f"[vid1]scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768[main]; "
-                        f"movie={safe_logo},scale=175:-1,format=rgba,colorchannelmixer=aa=0.65[logo]; "
-                        f"[main][logo]overlay=main_w-overlay_w-30:main_h-overlay_h-26[vo]"
-                    )
-                    cmd.append(f"--lavfi-complex={lavfi_filter}")
-                cmd.append(stream_url)
 
             try:
                 pygame.display.quit()
@@ -2316,22 +2306,12 @@ class SNfetchDashboard:
                 "mpv",
                 "--fullscreen",
                 "--geometry=1024x768",
-                "--vo=wlshm",
-                "--hwdec=no",
                 "--audio-fallback-to-null=yes",
                 "--keep-open=no",
                 "--force-window=yes",
                 "--title=STATION NORTH TV IDENT",
+                str(clip_path),
             ]
-            if Path(logo_path).exists():
-                safe_logo = logo_path.replace(":", "\\:").replace("\\", "/")
-                lavfi_filter = (
-                    f"[vid1]scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768[main]; "
-                    f"movie={safe_logo},scale=175:-1,format=rgba,colorchannelmixer=aa=0.65[logo]; "
-                    f"[main][logo]overlay=main_w-overlay_w-30:main_h-overlay_h-26[vo]"
-                )
-                cmd.append(f"--lavfi-complex={lavfi_filter}")
-            cmd.append(str(clip_path))
         else:
             cmd = [
                 "ffplay",
