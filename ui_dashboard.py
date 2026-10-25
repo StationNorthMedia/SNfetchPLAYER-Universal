@@ -2066,7 +2066,9 @@ class SNfetchDashboard:
                 continue
 
             # Bauchbinde via nativem ASS-Untertitel (blendet sanft ein und nach 4.8s automatisch aus)
-            osd_file = generate_osd_ass(track, show_osd=True, is_repeat=self.shuffle_mgr.is_repeat_mode)
+            import importlib, osd_generator
+            importlib.reload(osd_generator)
+            osd_file = osd_generator.generate_osd_ass(track, show_osd=True, is_repeat=self.shuffle_mgr.is_repeat_mode)
 
             logo_file = APP_DIR / "sn_logo.png"
             logo_path = str(logo_file) if logo_file.exists() else str(Path("sn_logo.png").resolve())
