@@ -2122,6 +2122,10 @@ class SNfetchDashboard:
                     "mpv",
                     "--fullscreen",
                     "--geometry=1024x768",
+                    "--vo=wlshm",
+                    "--vd-lavc-threads=4",
+                    "--sws-scaler=fast-bilinear",
+                    "--sws-fast=yes",
                     "--audio-fallback-to-null=yes",
                     "--keep-open=no",
                     "--force-window=yes",
@@ -2135,16 +2139,16 @@ class SNfetchDashboard:
                 play_start_time = time.time()
                 env = os.environ.copy()
                 env["WAYLAND_DISPLAY"] = env.get("WAYLAND_DISPLAY", "wayland-1")
-                env["XDG_RUNTIME_DIR"] = env.get("XDG_RUNTIME_DIR", "/var/run/0-runtime-dir")
-                env["SWAYSOCK"] = env.get("SWAYSOCK", "/var/run/0-runtime-dir/sway-ipc.0.sock")
+                env["XDG_RUNTIME_DIR"] = env.get("XDG_RUNTIME_DIR", "/run/0-runtime-dir")
+                env["SWAYSOCK"] = env.get("SWAYSOCK", "/run/0-runtime-dir/sway-ipc.0.sock")
                 proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
                 self._trigger_prefetch_next_track(curr_idx, is_tv=True)
 
                 def _sway_focus():
                     time.sleep(0.15)
                     for _ in range(5):
-                        subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True)
-                        subprocess.run(["swaymsg", '[class="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True)
+                        subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
+                        subprocess.run(["swaymsg", '[class="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
                         time.sleep(0.2)
                 threading.Thread(target=_sway_focus, daemon=True).start()
             except Exception as e:
@@ -2306,6 +2310,10 @@ class SNfetchDashboard:
                 "mpv",
                 "--fullscreen",
                 "--geometry=1024x768",
+                "--vo=wlshm",
+                "--vd-lavc-threads=4",
+                "--sws-scaler=fast-bilinear",
+                "--sws-fast=yes",
                 "--audio-fallback-to-null=yes",
                 "--keep-open=no",
                 "--force-window=yes",
@@ -2328,14 +2336,14 @@ class SNfetchDashboard:
             pygame.display.quit()
             env = os.environ.copy()
             env["WAYLAND_DISPLAY"] = env.get("WAYLAND_DISPLAY", "wayland-1")
-            env["XDG_RUNTIME_DIR"] = env.get("XDG_RUNTIME_DIR", "/var/run/0-runtime-dir")
-            env["SWAYSOCK"] = env.get("SWAYSOCK", "/var/run/0-runtime-dir/sway-ipc.0.sock")
+            env["XDG_RUNTIME_DIR"] = env.get("XDG_RUNTIME_DIR", "/run/0-runtime-dir")
+            env["SWAYSOCK"] = env.get("SWAYSOCK", "/run/0-runtime-dir/sway-ipc.0.sock")
             proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
 
             def _sway_focus_id():
                 time.sleep(0.15)
                 for _ in range(5):
-                    subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True)
+                    subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
                     time.sleep(0.2)
             threading.Thread(target=_sway_focus_id, daemon=True).start()
         except Exception as e:
