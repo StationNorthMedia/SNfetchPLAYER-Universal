@@ -44,15 +44,47 @@ import pygame
 
 pygame.display.init()
 pygame.font.init()
-# PortMaster uses gptokeyb to map gamepad buttons to keyboard keys.
-# We block all raw joystick events in Pygame to prevent duplicate/conflicting inputs.
-pygame.event.set_blocked([
-    pygame.JOYAXISMOTION,
-    pygame.JOYBALLMOTION,
-    pygame.JOYHATMOTION,
-    pygame.JOYBUTTONDOWN,
-    pygame.JOYBUTTONUP,
-])
+# Universal image loader supporting PNG, JPG, and WebP across all platforms
+def load_surface_universal(path_or_str: Union[str, Path]) -> Optional[pygame.Surface]:
+    p = Path(path_or_str)
+    if not p.exists():
+        return None
+    try:
+        surf = pygame.image.load(str(p))
+        if pygame.display.get_surface():
+            surf = surf.convert_alpha()
+        return surf
+    except Exception:
+        # Fallback for environments where SDL_image lacks WebP/PNG formats
+        try:
+            from PIL import Image
+            with Image.open(str(p)) as im:
+                im_rgba = im.convert("RGBA")
+                surf = pygame.image.fromstring(im_rgba.tobytes(), im_rgba.size, "RGBA")
+                if pygame.display.get_surface():
+                    surf = surf.convert_alpha()
+                return surf
+        except Exception as e:
+            logging.debug(f"Failed to load image {p}: {e}")
+            return None
+
+# Gamepad Event Configuration:
+# In PortMaster environments, gptokeyb translates gamepad inputs to keyboard keys.
+# On standalone PC desktop, native gamepad events (Pygame joystick) are fully enabled.
+IS_PORTMASTER = "GPTOKEYB" in os.environ or os.path.exists("/opt/system/Tools/PortMaster") or os.path.exists("/roms/ports/PortMaster")
+if IS_PORTMASTER:
+    pygame.event.set_blocked([
+        pygame.JOYAXISMOTION,
+        pygame.JOYBALLMOTION,
+        pygame.JOYHATMOTION,
+        pygame.JOYBUTTONDOWN,
+        pygame.JOYBUTTONUP,
+    ])
+else:
+    pygame.event.set_blocked([
+        pygame.MOUSEMOTION,
+        pygame.JOYBALLMOTION,
+    ])
 
 IS_WINDOWED = os.environ.get("SN_WINDOWED") == "1" or "--window" in sys.argv
 if IS_WINDOWED:
@@ -550,8 +582,10 @@ class ThumbnailManager:
         for p in candidate_paths:
             if p.exists():
                 try:
-                    raw = pygame.image.load(str(p))
-                    surf = raw.convert() if pygame.display.get_surface() else raw
+                    raw = load_surface_universal(p)
+                    if not raw:
+                        continue
+                    surf = raw
                     w, h = surf.get_size()
                     target_ratio = sz[0] / float(sz[1])
                     src_ratio = w / float(h)
@@ -755,6 +789,26 @@ class SNfetchDashboard:
         self.logo_img = self._load_logo()
         self.logo_large = self._load_large_logo()
 
+        # Set Window and Taskbar Icon (Station North Logo instead of default pygame snake)
+        if self.logo_large or self.logo_img:
+            icon_surf = self.logo_large if self.logo_large else self.logo_img
+            try:
+                pygame.display.set_icon(pygame.transform.smoothscale(icon_surf, (64, 64)))
+            except Exception:
+                pass
+
+        # Gamepad Subsystem (PS4 / Xbox / Generic controllers on PC)
+        self.joysticks = []
+        try:
+            pygame.joystick.init()
+            for i in range(pygame.joystick.get_count()):
+                j = pygame.joystick.Joystick(i)
+                j.init()
+                self.joysticks.append(j)
+                logging.info(f"Gamepad initialized: {j.get_name()}")
+        except Exception as e:
+            logging.debug(f"Gamepad init: {e}")
+
         # Playlists
         self.available_playlists: List[Dict[str, str]] = []
         self.radio_playlist_idx = 0
@@ -888,28 +942,18 @@ class SNfetchDashboard:
     def _load_logo(self) -> Optional[pygame.Surface]:
         paths = [APP_DIR / "sn_logo.png", Path("sn_logo.png")]
         for p in paths:
-            if p.exists():
-                try:
-                    img = pygame.image.load(str(p))
-                    if pygame.display.get_surface():
-                        img = img.convert_alpha()
-                    # Scale to 67x42 keeping 400:250 ratio for header
-                    return pygame.transform.smoothscale(img, (67, 42))
-                except Exception:
-                    pass
+            surf = load_surface_universal(p)
+            if surf:
+                # Scale to 67x42 keeping 400:250 ratio for header
+                return pygame.transform.smoothscale(surf, (67, 42))
         return None
 
     def _load_large_logo(self) -> Optional[pygame.Surface]:
         paths = [APP_DIR / "sn_logo.png", Path("sn_logo.png")]
         for p in paths:
-            if p.exists():
-                try:
-                    img = pygame.image.load(str(p))
-                    if pygame.display.get_surface():
-                        img = img.convert_alpha()
-                    return img
-                except Exception:
-                    pass
+            surf = load_surface_universal(p)
+            if surf:
+                return surf
         return None
 
     def _discover_playlists(self):
@@ -1145,7 +1189,9 @@ class SNfetchDashboard:
         box_w, box_h = 910, 286
         for img_path in found_imgs[:20]:
             try:
-                raw_surf = pygame.image.load(str(img_path))
+                raw_surf = load_surface_universal(img_path)
+                if not raw_surf:
+                    continue
                 iw, ih = raw_surf.get_size()
                 if iw <= 0 or ih <= 0:
                     continue
@@ -2118,10 +2164,11 @@ class SNfetchDashboard:
             if not src.exists():
                 src = Path("sn_logo.png").resolve()
             if src.exists():
-                raw = pygame.image.load(str(src))
-                w = 175
-                h = int(raw.get_height() * (w / raw.get_width()))
-                scaled = pygame.transform.smoothscale(raw, (w, h))
+                raw = load_surface_universal(src)
+                if raw:
+                    w = 175
+                    h = int(raw.get_height() * (w / raw.get_width()))
+                    scaled = pygame.transform.smoothscale(raw, (w, h))
                 out = pygame.Surface((w, h), pygame.SRCALPHA)
                 scaled.set_alpha(int(255 * 0.65))
                 out.blit(scaled, (0, 0))
@@ -3611,9 +3658,9 @@ class SNfetchDashboard:
             for ip in img_paths:
                 if ip.exists():
                     try:
-                        raw = pygame.image.load(str(ip))
-                        if pygame.display.get_surface():
-                            raw = raw.convert()
+                        raw = load_surface_universal(ip)
+                        if not raw:
+                            continue
                         rw, rh = raw.get_size()
                         scale = min((col1_w - 24) / rw, avail_h / rh)
                         target_size = (int(rw * scale), int(rh * scale))
@@ -4296,6 +4343,51 @@ class SNfetchDashboard:
                 elif event.type == pygame.KEYDOWN:
                     if not self._handle_action_key(event.key):
                         running = False
+
+                elif event.type == pygame.JOYBUTTONDOWN:
+                    # PS4 / Xbox gamepad mappings
+                    b = event.button
+                    if b in (0, 9):  # Cross / A / Options / Start
+                        if not self._handle_action_key(pygame.K_RETURN):
+                            running = False
+                    elif b == 1:     # Circle / B
+                        if not self._handle_action_key(pygame.K_ESCAPE):
+                            running = False
+                    elif b == 2:     # Square / X
+                        self._handle_action_key(pygame.K_SPACE)
+                    elif b in (3, 8): # Triangle / Y / Share / Select
+                        self._handle_action_key(pygame.K_TAB)
+                    elif b in (4, 13): # L1 / D-Pad Left
+                        self._handle_action_key(pygame.K_LEFT)
+                    elif b in (5, 14): # R1 / D-Pad Right
+                        self._handle_action_key(pygame.K_RIGHT)
+                    elif b == 11:    # D-Pad Up
+                        self._handle_action_key(pygame.K_UP)
+                    elif b == 12:    # D-Pad Down
+                        self._handle_action_key(pygame.K_DOWN)
+
+                elif event.type == pygame.JOYHATMOTION:
+                    hx, hy = event.value
+                    if hx < 0:
+                        self._handle_action_key(pygame.K_LEFT)
+                    elif hx > 0:
+                        self._handle_action_key(pygame.K_RIGHT)
+                    if hy < 0:
+                        self._handle_action_key(pygame.K_DOWN)
+                    elif hy > 0:
+                        self._handle_action_key(pygame.K_UP)
+
+                elif event.type == pygame.JOYAXISMOTION:
+                    if event.axis == 0:
+                        if event.value < -0.65:
+                            self._handle_action_key(pygame.K_LEFT)
+                        elif event.value > 0.65:
+                            self._handle_action_key(pygame.K_RIGHT)
+                    elif event.axis == 1:
+                        if event.value < -0.65:
+                            self._handle_action_key(pygame.K_UP)
+                        elif event.value > 0.65:
+                            self._handle_action_key(pygame.K_DOWN)
 
             if self.state == STATE_SPLASH:
                 self.draw_splash_screen()
