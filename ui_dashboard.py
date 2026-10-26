@@ -566,15 +566,15 @@ class IntegratedVisualizer:
 
                 max_in_frame = max(raw_bands) if raw_bands else 1.0
                 if max_in_frame > self.peak_energy:
-                    self.peak_energy = self.peak_energy * 0.75 + max_in_frame * 0.25
+                    self.peak_energy = self.peak_energy * 0.60 + max_in_frame * 0.40
                 else:
-                    self.peak_energy = max(2000.0, self.peak_energy * 0.965 + max_in_frame * 0.035)
+                    self.peak_energy = max(2000.0, self.peak_energy * 0.96 + max_in_frame * 0.04)
 
                 bands = []
                 for raw_val in raw_bands:
                     ratio = min(1.0, max(0.0, raw_val / max(1.0, self.peak_energy)))
-                    curve = ratio ** 0.6
-                    h = 14.0 + 185.0 * curve
+                    curve = ratio ** 0.62
+                    h = 14.0 + 195.0 * curve
                     bands.append(h)
 
                 self.target_heights = bands
@@ -632,11 +632,11 @@ class IntegratedVisualizer:
         # 1. Real FFT spectrum (active when raw PCM chunk was fed within last 0.8s)
         if is_active and self.has_real_audio and (now - self.last_audio_feed) < 0.8:
             for i in range(self.num_bars):
-                # Snappy attack, smooth decay
+                # Lightning-fast attack (instant bass hit), crisp bounce decay
                 if self.target_heights[i] > self.heights[i]:
-                    self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 26.0)
+                    self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 52.0)
                 else:
-                    self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 11.0)
+                    self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 15.0)
         else:
             # 2. Idle gentle decay to baseline (14.0 px)
             for i in range(self.num_bars):
@@ -2003,8 +2003,8 @@ class SNfetchDashboard:
                     "--rate=22050",
                     "--format=s16le",
                     "--channels=1",
-                    "--latency-msec=20",
-                    "--process-time-msec=20"
+                    "--latency-msec=10",
+                    "--process-time-msec=10"
                 ]
                 self.audio_tap_proc = subprocess.Popen(
                     cmd,
@@ -2019,29 +2019,38 @@ class SNfetchDashboard:
     def _audio_spectrum_reader(self, proc: subprocess.Popen, is_tap: bool = False):
         if not proc or not proc.stdout:
             return
-        chunk_size = 1024  # 512 samples (~23.2ms) for optimal 43 FPS visualizer cadence
-        chunk_duration = (chunk_size // 2) / 22050.0
-        
-        # Audio DAC hardware / ring buffer delay compensation only when reading ahead from ffmpeg
-        if not is_tap:
-            time.sleep(0.35)
-            next_chunk_time = time.time()
-        
+
+        fd = proc.stdout.fileno()
+        try:
+            fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        except Exception:
+            pass
+
+        chunk_size = 1024  # 512 samples (~23.2ms)
+        last_chunk = b""
+
         try:
             while proc and proc.poll() is None and self.is_playing:
-                data = proc.stdout.read(chunk_size)
-                if not data:
-                    break
-                self.visualizer.feed_pcm(data)
-                
-                # Pace the reader only if not a blocking hardware tap (pipe needs pacing, tap blocks naturally)
-                if not is_tap:
-                    next_chunk_time += chunk_duration
-                    sleep_time = next_chunk_time - time.time()
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
-                    elif sleep_time < -0.15:
-                        next_chunk_time = time.time()
+                # Read all pending data from the pipe buffer up to 16KB to eliminate any backlog
+                drained = b""
+                while True:
+                    try:
+                        part = os.read(fd, 4096)
+                        if not part:
+                            break
+                        drained += part
+                        if len(drained) > 16384:
+                            drained = drained[-4096:]  # Keep only the very latest samples
+                    except (BlockingIOError, InterruptedError):
+                        break
+
+                if drained:
+                    last_chunk = (last_chunk + drained)[-chunk_size:]
+                    if len(last_chunk) >= 512:
+                        self.visualizer.feed_pcm(last_chunk)
+
+                time.sleep(0.015)  # Fast 66 FPS polling rate matching 60Hz display refresh
         except Exception:
             pass
         finally:
