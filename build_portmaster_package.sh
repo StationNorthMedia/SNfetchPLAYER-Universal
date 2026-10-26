@@ -81,10 +81,12 @@ with zipfile.ZipFile('$DIST_DIR/snfetchplayer.zip', 'w', zipfile.ZIP_DEFLATED) a
                 z.write(filepath, arcname)
 "
 
-# 6. Komplettpaket (Full Offline Bundle mit allen Assets) bauen
+# 6. Komplettpaket (Full Offline Bundle mit allen Assets, Demo-Videos & Demo-Musik) bauen
 if [ -d "$SCRIPT_DIR/assets" ]; then
-  echo "📦 Erstelle Komplettpaket mit allen Assets (snfetchplayer-full.zip)..."
+  echo "📦 Erstelle Komplettpaket mit allen Assets, Demo-Videos & Musik (snfetchplayer-full.zip)..."
   cp -r "$SCRIPT_DIR/assets/"* "$PKG_DIR/assets/"
+  cp -r "$SCRIPT_DIR/music/"* "$PKG_DIR/music/" 2>/dev/null || true
+  cp -r "$SCRIPT_DIR/videos/"* "$PKG_DIR/videos/" 2>/dev/null || true
   python3 -c "
 import zipfile, os
 with zipfile.ZipFile('$DIST_DIR/snfetchplayer-full.zip', 'w', zipfile.ZIP_DEFLATED) as z:
