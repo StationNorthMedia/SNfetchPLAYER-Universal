@@ -446,8 +446,8 @@ class IntegratedVisualizer:
         dt = now - self.last_update
         self.last_update = now
 
-        # 1. Real FFT spectrum (active when raw PCM chunk was fed within last 0.35s)
-        if is_active and self.has_real_audio and (now - self.last_audio_feed) < 0.35:
+        # 1. Real FFT spectrum (active when raw PCM chunk was fed within last 0.8s)
+        if is_active and self.has_real_audio and (now - self.last_audio_feed) < 0.8:
             for i in range(self.num_bars):
                 # Snappy attack, smooth decay
                 if self.target_heights[i] > self.heights[i]:
@@ -1776,13 +1776,28 @@ class SNfetchDashboard:
         if self.audio_proc and self.audio_proc.stdout:
             threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc, False), daemon=True).start()
         elif shutil.which("parec"):
+            if self.audio_tap_proc and self.audio_tap_proc.poll() is None:
+                try:
+                    self.audio_tap_proc.terminate()
+                except Exception:
+                    pass
+                self.audio_tap_proc = None
+
             env = dict(os.environ)
             if "XDG_RUNTIME_DIR" not in env or not os.path.exists(env["XDG_RUNTIME_DIR"]):
                 if os.path.exists("/var/run/0-runtime-dir"):
                     env["XDG_RUNTIME_DIR"] = "/var/run/0-runtime-dir"
             try:
+                cmd = [
+                    "parec",
+                    "--rate=22050",
+                    "--format=s16le",
+                    "--channels=1",
+                    "--latency-msec=20",
+                    "--process-time-msec=20"
+                ]
                 self.audio_tap_proc = subprocess.Popen(
-                    ["parec", "--rate=22050", "--format=s16le", "--channels=1"],
+                    cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     env=env
