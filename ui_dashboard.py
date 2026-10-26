@@ -32,6 +32,7 @@ import subprocess
 import signal
 import shutil
 import logging
+import select
 try:
     import fcntl
 except ImportError:
@@ -43,6 +44,10 @@ from typing import List, Dict, Optional, Tuple, Union, Callable, Any
 
 from platform_detector import get_platform, PlatformType, AudioPipeline
 _PLATFORM = get_platform()
+
+# Force Hardware OpenGL ES 2 renderer on Handhelds
+if _PLATFORM.is_handheld:
+    os.environ.setdefault("SDL_RENDERER_DRIVER", "opengles2")
 
 APP_DIR = Path(__file__).resolve().parent
 if _PLATFORM.should_use_bundled_pylib:
@@ -80,21 +85,23 @@ def load_surface_universal(path_or_str: Union[str, Path]) -> Optional[pygame.Sur
             return None
 
 # Gamepad Event Configuration:
-# In PortMaster environments, gptokeyb translates gamepad inputs to keyboard keys.
+# In handheld environments (ROCKNIX, ArkOS, EmuELEC), gptokeyb translates gamepad inputs to keyboard keys.
 # On standalone PC desktop, native gamepad events (Pygame joystick) are fully enabled.
-IS_PORTMASTER = "GPTOKEYB" in os.environ or os.path.exists("/opt/system/Tools/PortMaster") or os.path.exists("/roms/ports/PortMaster")
-if IS_PORTMASTER:
-    pygame.event.set_blocked([
+if _PLATFORM.is_pc:
+    pygame.event.set_allowed([
         pygame.JOYAXISMOTION,
-        pygame.JOYBALLMOTION,
         pygame.JOYHATMOTION,
         pygame.JOYBUTTONDOWN,
         pygame.JOYBUTTONUP,
     ])
 else:
     pygame.event.set_blocked([
-        pygame.MOUSEMOTION,
+        pygame.JOYAXISMOTION,
         pygame.JOYBALLMOTION,
+        pygame.JOYHATMOTION,
+        pygame.JOYBUTTONDOWN,
+        pygame.JOYBUTTONUP,
+        pygame.MOUSEMOTION,
     ])
 
 IS_WINDOWED = _PLATFORM.is_windowed or "--window" in sys.argv
@@ -532,6 +539,13 @@ class IntegratedVisualizer:
         self.last_audio_feed = 0.0
         self.peak_energy = 15000.0  # Adaptiver Dynamik-Baseline-Wert (AGC)
 
+        # Pre-rendered circle cap beads for zero-CPU blitting
+        self._cap_cache = {}
+        for col in (NORD14, NORD13, NORD12, NORD11):
+            s = pygame.Surface((22, 22), pygame.SRCALPHA)
+            pygame.draw.circle(s, col, (11, 11), 8)
+            self._cap_cache[col] = s
+
         # Fast Precomputations for NumPy FFT (< 0.1ms compute time)
         if np is not None:
             self._np_win_512 = np.hanning(512).astype(np.float32)
@@ -574,14 +588,14 @@ class IntegratedVisualizer:
 
                 max_in_frame = max(raw_bands) if raw_bands else 1.0
                 if max_in_frame > self.peak_energy:
-                    self.peak_energy = self.peak_energy * 0.60 + max_in_frame * 0.40
+                    self.peak_energy = self.peak_energy * 0.75 + max_in_frame * 0.25
                 else:
-                    self.peak_energy = max(2000.0, self.peak_energy * 0.96 + max_in_frame * 0.04)
+                    self.peak_energy = max(2000.0, self.peak_energy * 0.965 + max_in_frame * 0.035)
 
                 bands = []
                 for raw_val in raw_bands:
                     ratio = min(1.0, max(0.0, raw_val / max(1.0, self.peak_energy)))
-                    curve = ratio ** 0.62
+                    curve = ratio ** 0.60
                     h = 14.0 + 195.0 * curve
                     bands.append(h)
 
@@ -622,8 +636,8 @@ class IntegratedVisualizer:
             bands = []
             for raw_val in raw_bands:
                 ratio = min(1.0, max(0.0, raw_val / max(1.0, self.peak_energy)))
-                curve = ratio ** 0.6
-                h = 14.0 + 185.0 * curve
+                curve = ratio ** 0.60
+                h = 14.0 + 195.0 * curve
                 bands.append(h)
 
             self.target_heights = bands
@@ -640,30 +654,29 @@ class IntegratedVisualizer:
         # 1. Real FFT spectrum (active when raw PCM chunk was fed within last 0.8s)
         if is_active and self.has_real_audio and (now - self.last_audio_feed) < 0.8:
             for i in range(self.num_bars):
-                # Lightning-fast attack (instant bass hit), crisp bounce decay
+                # 100% Instant Attack (blitzschneller Bass-Punch), natürliches elastisches Decay
                 if self.target_heights[i] > self.heights[i]:
-                    self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 52.0)
+                    self.heights[i] = self.target_heights[i]
                 else:
-                    self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 15.0)
+                    self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 14.0)
         else:
             # 2. Idle gentle decay to baseline (14.0 px)
             for i in range(self.num_bars):
                 self.heights[i] += (14.0 - self.heights[i]) * min(1.0, dt * 6.0)
-
 
     def draw(self, surface: pygame.Surface, x: int, y: int, width: int, max_h: int = 220):
         bar_gap = 7
         total_gaps = (self.num_bars - 1) * bar_gap
         bar_w = max(6, int((width - total_gaps) / self.num_bars))
         scale = max_h / 220.0
+        bar_col = (112, 146, 176)
 
         for i in range(self.num_bars):
             bx = x + i * (bar_w + bar_gap)
             bh = int(min(max_h, self.heights[i] * scale))
             by = y + max_h - bh
 
-            # Pill bar body (Arctic slate-blue pill matching mockup)
-            bar_col = (112, 146, 176)
+            # Pill bar body
             pygame.draw.rect(surface, bar_col, (bx, by, bar_w, bh), border_radius=bar_w // 2)
 
             # Cap / Bead color across spectrum (Green -> Gold -> Peach -> Red)
@@ -677,11 +690,9 @@ class IntegratedVisualizer:
             else:
                 cap_col = NORD11 # Red (Treble)
 
-            # Bead circle right on top of pill
-            cap_radius = bar_w // 2 + 1
-            cap_cx = bx + bar_w // 2
-            cap_cy = by
-            pygame.draw.circle(surface, cap_col, (cap_cx, cap_cy), cap_radius)
+            cap_surf = self._cap_cache.get(cap_col)
+            if cap_surf:
+                surface.blit(cap_surf, (bx + (bar_w - 22) // 2, by - 10))
 
 # =============================================================================
 # THUMBNAIL CACHE & GENERATOR
@@ -924,17 +935,18 @@ class SNfetchDashboard:
             except Exception:
                 pass
 
-        # Gamepad Subsystem (PS4 / Xbox / Generic controllers on PC)
+        # Gamepad Subsystem (PS4 / Xbox / Generic controllers on PC ONLY)
         self.joysticks = []
-        try:
-            pygame.joystick.init()
-            for i in range(pygame.joystick.get_count()):
-                j = pygame.joystick.Joystick(i)
-                j.init()
-                self.joysticks.append(j)
-                logging.info(f"Gamepad initialized: {j.get_name()}")
-        except Exception as e:
-            logging.debug(f"Gamepad init: {e}")
+        if self.platform.is_pc:
+            try:
+                pygame.joystick.init()
+                for i in range(pygame.joystick.get_count()):
+                    j = pygame.joystick.Joystick(i)
+                    j.init()
+                    self.joysticks.append(j)
+                    logging.info(f"Gamepad initialized: {j.get_name()}")
+            except Exception as e:
+                logging.debug(f"Gamepad init: {e}")
 
         # Playlists
         self.available_playlists: List[Dict[str, str]] = []
@@ -1999,17 +2011,19 @@ class SNfetchDashboard:
 
             try:
                 cmd = [
+                    "stdbuf", "-o0",
                     "parec",
                     "--rate=22050",
                     "--format=s16le",
                     "--channels=1",
-                    "--latency-msec=20",
-                    "--process-time-msec=20"
+                    "--latency-msec=10",
+                    "--process-time-msec=10"
                 ]
                 self.audio_tap_proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
+                    bufsize=0,
                     env=self.audio_env
                 )
                 threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_tap_proc, True), daemon=True).start()
@@ -2023,37 +2037,57 @@ class SNfetchDashboard:
         if not proc or not proc.stdout:
             return
 
-        chunk_size = 1024  # 512 samples (~23.2ms) for optimal 43 FPS visualizer cadence
+        chunk_size = 1024  # 512 samples (~23.2ms)
         chunk_duration = (chunk_size // 2) / 22050.0
 
-        # Audio DAC hardware / ring buffer delay compensation only when reading ahead from ffmpeg
         if not is_tap:
+            # Audio DAC hardware / ring buffer delay compensation only when reading ahead from ffmpeg
             time.sleep(0.35)
             next_chunk_time = time.time()
-
-        try:
-            while proc and proc.poll() is None and self.is_playing:
-                data = proc.stdout.read(chunk_size)
-                if not data:
-                    break
-                self.visualizer.feed_pcm(data)
-
-                # Pace the reader only if not a blocking hardware tap (pipe needs pacing, tap blocks naturally)
-                if not is_tap:
+            try:
+                while proc and proc.poll() is None and self.is_playing:
+                    data = proc.stdout.read(chunk_size)
+                    if not data:
+                        break
+                    self.visualizer.feed_pcm(data)
                     next_chunk_time += chunk_duration
                     sleep_time = next_chunk_time - time.time()
                     if sleep_time > 0:
                         time.sleep(sleep_time)
                     elif sleep_time < -0.15:
                         next_chunk_time = time.time()
-        except Exception:
-            pass
-        finally:
-            if is_tap and proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
+            except Exception:
+                pass
+        else:
+            # ZERO-LATENCY PIPE DRAIN FOR HARDWARE TAP (parec)
+            # Drains any accumulated backlog in the OS pipe and feeds ONLY the latest live chunk
+            fd = proc.stdout.fileno()
+            os.set_blocking(fd, False)
+            try:
+                while proc and proc.poll() is None and self.is_playing:
+                    r, _, _ = select.select([fd], [], [], 0.04)
+                    if r:
+                        drained = b""
+                        while True:
+                            try:
+                                chunk = os.read(fd, 4096)
+                                if not chunk:
+                                    break
+                                drained += chunk
+                            except (BlockingIOError, InterruptedError):
+                                break
+                        if drained:
+                            latest = drained[-chunk_size:]
+                            if len(latest) >= 512:
+                                self.visualizer.feed_pcm(latest)
+            except Exception:
+                pass
+            finally:
+                if proc and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
 
     def trigger_play_track_async(self, idx: int):
         with self._audio_lock:
@@ -2093,7 +2127,7 @@ class SNfetchDashboard:
                         stdout_mode = subprocess.PIPE
                     elif shutil.which("mpv"):
                         ao_arg = "--ao=pulse,alsa" if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP else "--ao=alsa"
-                        cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-fallback-to-null=yes", str(jingle_path)]
+                        cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", str(jingle_path)]
                         stdout_mode = subprocess.DEVNULL
                     else:
                         cmd = ["aplay", "-q", str(jingle_path)]
@@ -2181,7 +2215,7 @@ class SNfetchDashboard:
                     stdout_mode = subprocess.PIPE
                 elif shutil.which("mpv"):
                     ao_arg = "--ao=pulse,alsa" if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP else "--ao=alsa"
-                    cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-fallback-to-null=yes", stream_url]
+                    cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", stream_url]
                     stdout_mode = subprocess.DEVNULL
                 else:
                     cmd = ["aplay", "-q", stream_url]

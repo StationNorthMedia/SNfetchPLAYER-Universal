@@ -117,6 +117,14 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-1}"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/var/run/0-runtime-dir}"
 export SWAYSOCK="${SWAYSOCK:-/var/run/0-runtime-dir/sway-ipc.0.sock}"
 
+# Hardware-beschleunigtes Rendering (Mali G31 Bifrost GPU) erzwingen
+export SDL_RENDERER_DRIVER="opengles2"
+if [ -n "$WAYLAND_DISPLAY" ] && [ -e "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+  export SDL_VIDEODRIVER="wayland"
+else
+  export SDL_VIDEODRIVER="kmsdrm"
+fi
+
 # -----------------------------------------------------------------------------
 # 3. Python-Interpreter ermitteln (Fast-Path: Natives System-Python bevorzugen)
 # -----------------------------------------------------------------------------
