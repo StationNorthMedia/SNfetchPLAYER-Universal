@@ -35,7 +35,7 @@ import logging
 import urllib.request
 import urllib.parse
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Union, Callable, Any
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -330,8 +330,59 @@ class HardwareManager:
     def get_time_str() -> str:
         return time.strftime("%H:%M")
 
-    @staticmethod
-    def get_master_volume() -> int:
+    _cached_volume: Optional[int] = None
+    _target_volume_to_apply: Optional[int] = None
+    _vol_worker_thread: Optional[threading.Thread] = None
+    _vol_worker_event: threading.Event = threading.Event()
+
+    @classmethod
+    def _ensure_vol_worker(cls):
+        if cls._vol_worker_thread is not None and cls._vol_worker_thread.is_alive():
+            return
+
+        def _worker():
+            while True:
+                cls._vol_worker_event.wait(timeout=1.0)
+                cls._vol_worker_event.clear()
+                while cls._target_volume_to_apply is not None:
+                    pct = cls._target_volume_to_apply
+                    cls._target_volume_to_apply = None
+                    try:
+                        # 1. Direct hardware ALSA Master mixer
+                        if shutil.which("amixer"):
+                            subprocess.run(
+                                ["amixer", "sset", "Master", f"{pct}%"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=0.25,
+                            )
+                        # 2. PipeWire / PulseAudio via pactl with valid XDG runtime
+                        env = dict(os.environ)
+                        if "XDG_RUNTIME_DIR" not in env or not os.path.exists(env.get("XDG_RUNTIME_DIR", "")):
+                            for cand in ["/var/run/0-runtime-dir", "/run/0-runtime-dir", "/run/user/0"]:
+                                if os.path.exists(cand):
+                                    env["XDG_RUNTIME_DIR"] = cand
+                                    break
+                        if shutil.which("pactl"):
+                            subprocess.run(
+                                ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=0.25,
+                                env=env,
+                            )
+                    except Exception:
+                        pass
+                    time.sleep(0.04)
+
+        cls._vol_worker_thread = threading.Thread(target=_worker, daemon=True, name="AsyncVolumeWorker")
+        cls._vol_worker_thread.start()
+
+    @classmethod
+    def get_master_volume(cls) -> int:
+        if cls._cached_volume is not None:
+            return cls._cached_volume
+
         env = dict(os.environ)
         if "XDG_RUNTIME_DIR" not in env or not os.path.exists(env.get("XDG_RUNTIME_DIR", "")):
             for cand in ["/var/run/0-runtime-dir", "/run/0-runtime-dir", "/run/user/0"]:
@@ -340,28 +391,49 @@ class HardwareManager:
                     break
         if shutil.which("pactl"):
             try:
-                res = subprocess.run(["pactl", "get-sink-volume", "@DEFAULT_SINK@"], capture_output=True, text=True, timeout=0.6, env=env)
+                res = subprocess.run(["pactl", "get-sink-volume", "@DEFAULT_SINK@"], capture_output=True, text=True, timeout=0.3, env=env)
                 for part in res.stdout.split():
                     if part.endswith("%") and part[:-1].isdigit():
-                        return max(0, min(100, int(part[:-1])))
+                        cls._cached_volume = max(0, min(100, int(part[:-1])))
+                        return cls._cached_volume
             except Exception:
                 pass
 
         if shutil.which("amixer"):
             for ctrl in ["Master", "Playback"]:
                 try:
-                    res = subprocess.run(["amixer", "sget", ctrl], capture_output=True, text=True, timeout=0.6)
+                    res = subprocess.run(["amixer", "sget", ctrl], capture_output=True, text=True, timeout=0.3)
                     for line in res.stdout.splitlines():
                         if "[" in line and "%]" in line:
                             part = line.split("[")[1].split("%]")[0]
                             if part.isdigit():
-                                return int(part)
+                                cls._cached_volume = max(0, min(100, int(part)))
+                                return cls._cached_volume
                 except Exception:
                     pass
+        cls._cached_volume = 80
         return 80
 
-    @staticmethod
-    def start_adc_volume_listener(callback: Callable[[int], None]):
+    @classmethod
+    def adjust_volume(cls, delta: int) -> int:
+        curr = cls.get_master_volume()
+        new_v = max(0, min(100, curr + delta))
+        cls._cached_volume = new_v
+        cls._target_volume_to_apply = new_v
+        cls._ensure_vol_worker()
+        cls._vol_worker_event.set()
+        return new_v
+
+    @classmethod
+    def set_master_volume(cls, pct: int, delta: Optional[int] = None):
+        new_v = max(0, min(100, pct))
+        cls._cached_volume = new_v
+        cls._target_volume_to_apply = new_v
+        cls._ensure_vol_worker()
+        cls._vol_worker_event.set()
+
+    @classmethod
+    def start_adc_volume_listener(cls, callback: Callable[[int], None]):
         """Hardware volume listener for RK3326 / R36S ADC resistor ladder rocker on Channel 2."""
         adc_file = Path("/sys/bus/iio/devices/iio:device0/in_voltage2_raw")
         if not adc_file.exists():
@@ -392,7 +464,7 @@ class HardwareManager:
                             callback(direction)
                         else:
                             held_duration = now - press_start_time
-                            if held_duration > 0.30 and (now - last_trigger_time) > 0.16:
+                            if held_duration > 0.35 and (now - last_trigger_time) > 0.18:
                                 last_trigger_time = now
                                 callback(direction)
                 except Exception:
@@ -402,44 +474,6 @@ class HardwareManager:
         t = threading.Thread(target=_worker, daemon=True, name="ADCVolumeListener")
         t.start()
         return stop_event
-
-    @staticmethod
-    def adjust_volume(delta: int) -> int:
-        curr = HardwareManager.get_master_volume()
-        new_v = max(0, min(100, curr + delta))
-        HardwareManager.set_master_volume(new_v, delta=delta)
-        return new_v
-
-    @staticmethod
-    def set_master_volume(pct: int, delta: Optional[int] = None):
-        pct = max(0, min(100, pct))
-        # 1. ROCKNIX hardware volume CLI
-        if delta is not None and shutil.which("volume"):
-            try:
-                subprocess.run(["volume", "up" if delta > 0 else "down"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.4)
-            except Exception:
-                pass
-
-        # 2. PipeWire / PulseAudio via pactl
-        env = dict(os.environ)
-        if "XDG_RUNTIME_DIR" not in env or not os.path.exists(env.get("XDG_RUNTIME_DIR", "")):
-            for cand in ["/var/run/0-runtime-dir", "/run/0-runtime-dir", "/run/user/0"]:
-                if os.path.exists(cand):
-                    env["XDG_RUNTIME_DIR"] = cand
-                    break
-        if shutil.which("pactl"):
-            try:
-                subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.4, env=env)
-            except Exception:
-                pass
-
-        # 3. ALSA amixer fallback
-        if shutil.which("amixer"):
-            try:
-                subprocess.run(["amixer", "sset", "Playback", f"{pct}%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.4)
-                subprocess.run(["amixer", "sset", "Master", f"{pct}%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.4)
-            except Exception:
-                pass
 
     @staticmethod
     def get_brightness() -> int:
