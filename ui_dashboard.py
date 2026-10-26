@@ -38,6 +38,9 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Union, Callable, Any
 
 APP_DIR = Path(__file__).resolve().parent
+pylib_dir = str(APP_DIR / "pylib")
+if pylib_dir not in sys.path:
+    sys.path.insert(0, pylib_dir)
 
 # Initialize Pygame with CFW default audio driver
 import pygame
@@ -506,8 +509,10 @@ class HardwareManager:
 # =============================================================================
 try:
     import numpy as np
-except ImportError:
+    logging.info("Hardware Acceleration: ARM NEON NumPy FFT loaded successfully! (%s)", np.__file__)
+except ImportError as e:
     np = None
+    logging.warning("Hardware Acceleration: NumPy not available, falling back to math loop: %s", e)
 
 class IntegratedVisualizer:
     def __init__(self, num_bars: int = 40):
