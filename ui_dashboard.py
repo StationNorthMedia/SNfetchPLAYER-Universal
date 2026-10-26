@@ -4459,6 +4459,18 @@ class SNfetchDashboard:
         a_surf = self._render_cached_text(artist, 20, bold=True, color=NORD8)
         self.screen.blit(a_surf, (cx - a_surf.get_width() // 2, 138))
 
+        # Active Playlist Pill in Zen Mode
+        pl_radio_raw = self.available_playlists[self.radio_playlist_idx]["title"] if (self.available_playlists and self.radio_playlist_idx < len(self.available_playlists)) else "Station North Radio"
+        clean_radio_pl = pl_radio_raw.replace("Station North • ", "").strip().upper()
+        pl_zen_s = self._render_cached_text(f"● {clean_radio_pl}", 16, bold=True, color=NORD14)
+        pill_w = pl_zen_s.get_width() + 28
+        pill_h = 28
+        zen_pill_surf = pygame.Surface((pill_w, pill_h), pygame.SRCALPHA)
+        zen_pill_surf.fill((22, 27, 36, 175))
+        pygame.draw.rect(zen_pill_surf, (56, 64, 78, 200), (0, 0, pill_w, pill_h), width=1, border_radius=8)
+        self.screen.blit(zen_pill_surf, (cx - pill_w // 2, 172))
+        self.screen.blit(pl_zen_s, (cx - pl_zen_s.get_width() // 2, 177))
+
         # Auto-Hide Check (4.0 Sekunden Inaktivitaet)
         if time.time() - self.radio_osd_last_interaction > 4.0:
             self.radio_osd_visible = False
@@ -4571,7 +4583,10 @@ class SNfetchDashboard:
             sub_sn = self._render_cached_text("Station North", 18, bold=True, color=NORD4)
             self.screen.blit(sub_sn, (cx - sub_sn.get_width() // 2, card1_y + 76))
 
-            stream_s = self._render_cached_text("SN-RADIO AUDIO STREAM", 22, bold=True, color=NORD8)
+            # Active Radio Playlist Name
+            pl_radio_raw = self.available_playlists[self.radio_playlist_idx]["title"] if (self.available_playlists and self.radio_playlist_idx < len(self.available_playlists)) else "Station North Radio"
+            clean_radio_pl = pl_radio_raw.replace("Station North • ", "").strip().upper()
+            stream_s = self._render_cached_text(clean_radio_pl, 22, bold=True, color=NORD8)
             self.screen.blit(stream_s, (cx - stream_s.get_width() // 2, card1_y + 106))
 
         # Vollbreiter organischer Wellen-Visualizer mit bunten Kappen
@@ -4667,9 +4682,10 @@ class SNfetchDashboard:
         b_tag = self._render_cached_text(stat_str, 18, bold=True, color=stat_col)
         badge_w = b_tag.get_width() + 28
         badge_h = 34
-        badge_pill = pygame.Rect(vm_x + 20, vm_y + 18, badge_w, badge_h)
-        pygame.draw.rect(self.screen, (22, 27, 36), badge_pill, border_radius=10)
-        pygame.draw.rect(self.screen, (56, 64, 78), badge_pill, width=1, border_radius=10)
+        badge_pill_surf = pygame.Surface((badge_w, badge_h), pygame.SRCALPHA)
+        badge_pill_surf.fill((16, 20, 28, 140))
+        pygame.draw.rect(badge_pill_surf, (67, 76, 94, 160), (0, 0, badge_w, badge_h), width=1, border_radius=10)
+        self.screen.blit(badge_pill_surf, (vm_x + 20, vm_y + 18))
         self.screen.blit(b_tag, (vm_x + 34, vm_y + 24))
 
         # Handheld vs PC Architecture & Controls Specification
@@ -4679,12 +4695,10 @@ class SNfetchDashboard:
             line1 = self._render_cached_text("STATION NORTH • TV BROADCAST", 26, bold=True, color=NORD6)
             line2 = self._render_cached_text("Hardware DRM Video Pipeline (Mali-G31 Direct)", 16, bold=True, color=NORD8)
             hint_str = "[A] LAUNCH FULLSCREEN • [B] MAIN MENU"
-            fs_hint_str = "[A] FULLSCREEN • [B] MENU"
         else:
             line1 = self._render_cached_text("STATION NORTH • PC SUITE EMULATION", 26, bold=True, color=NORD6)
             line2 = self._render_cached_text("Companion Video Engine: PyQt6 + libmpv OpenGL Pipeline", 16, bold=True, color=NORD8)
             hint_str = "[0] / CLICK: FULLSCREEN VIDEO • [ESC] DECK"
-            fs_hint_str = "DOUBLE-CLICK / [0] FOR FULLSCREEN"
 
         self.screen.blit(line1, (vm_x + 20, title_y))
         self.screen.blit(line2, (vm_x + 20, sub_y))
@@ -4692,14 +4706,15 @@ class SNfetchDashboard:
         # Horizontal accent line
         pygame.draw.line(self.screen, (46, 52, 64), (vm_x + 20, sub_y + 28), (vm_x + vid_w - 20, sub_y + 28), 1)
 
-        # Controls Card Box (Height = 224px)
+        # Controls Card Box (Translucent Frosted Glass - Height = 224px)
         cbox_x = vm_x + 18
         cbox_y = sub_y + 40
         cbox_w = vid_w - 36
         cbox_h = 224
-        cbox_rect = pygame.Rect(cbox_x, cbox_y, cbox_w, cbox_h)
-        pygame.draw.rect(self.screen, (22, 27, 37, 210), cbox_rect, border_radius=12)
-        pygame.draw.rect(self.screen, (52, 60, 74), cbox_rect, width=1, border_radius=12)
+        cbox_surf = pygame.Surface((cbox_w, cbox_h), pygame.SRCALPHA)
+        cbox_surf.fill((14, 18, 25, 65))
+        pygame.draw.rect(cbox_surf, (76, 86, 106, 110), (0, 0, cbox_w, cbox_h), width=1, border_radius=12)
+        self.screen.blit(cbox_surf, (cbox_x, cbox_y))
 
         if self.platform.is_handheld:
             # Row 1: [A] Button
@@ -4746,14 +4761,15 @@ class SNfetchDashboard:
             hint4 = self._render_cached_text("● Mouse or Arrow Keys ◄/► control cockpit deck", 15, bold=False, color=NORD4)
             self.screen.blit(hint4, (cbox_x + 18, cbox_y + 168))
 
-        # Bottom Full-Width Banner Pill
+        # Bottom Full-Width Banner Pill (Translucent Frosted Glass)
         pill_x = vm_x + 18
         pill_y = vm_y + vid_h - 48
         pill_w = vid_w - 36
         pill_h = 36
-        pill_rect = pygame.Rect(pill_x, pill_y, pill_w, pill_h)
-        pygame.draw.rect(self.screen, (22, 27, 36), pill_rect, border_radius=10)
-        pygame.draw.rect(self.screen, (56, 64, 78), pill_rect, width=1, border_radius=10)
+        pill_surf = pygame.Surface((pill_w, pill_h), pygame.SRCALPHA)
+        pill_surf.fill((16, 20, 28, 140))
+        pygame.draw.rect(pill_surf, (67, 76, 94, 160), (0, 0, pill_w, pill_h), width=1, border_radius=10)
+        self.screen.blit(pill_surf, (pill_x, pill_y))
         hint_s = self._render_cached_text(hint_str, 17, bold=True, color=NORD13)
         self.screen.blit(hint_s, (pill_x + (pill_w - hint_s.get_width()) // 2, pill_y + (pill_h - hint_s.get_height()) // 2))
 
@@ -4791,7 +4807,16 @@ class SNfetchDashboard:
         sn_tag = self._render_cached_text("STUDIO FEED", 24, bold=True, color=NORD6)
         self.screen.blit(sn_tag, (rp_x + (rp_w - sn_tag.get_width()) // 2, stat_y))
 
-        stat_sub = self._render_cached_text("CH-01 • DIRECT CRT", 16, bold=True, color=NORD14)
+        # Active TV Playlist Name with adaptive sizing
+        pl_tv_raw = self.available_playlists[self.tv_playlist_idx]["title"] if (self.available_playlists and self.tv_playlist_idx < len(self.available_playlists)) else "Main Top 100"
+        clean_tv_pl = pl_tv_raw.replace("Station North • ", "").strip().upper()
+        pl_font_sz = 16
+        pl_font = self._load_font(pl_font_sz, bold=True)
+        max_rack_text_w = rp_w - 24
+        while pl_font.size(clean_tv_pl)[0] > max_rack_text_w and pl_font_sz > 12:
+            pl_font_sz -= 1
+            pl_font = self._load_font(pl_font_sz, bold=True)
+        stat_sub = pl_font.render(clean_tv_pl, True, NORD14)
         self.screen.blit(stat_sub, (rp_x + (rp_w - stat_sub.get_width()) // 2, stat_y + 26))
 
         # Compact Audio Visualizer Bars
@@ -4813,9 +4838,10 @@ class SNfetchDashboard:
             by = vis_y + vis_h - bh - 6
             pygame.draw.rect(self.screen, NORD8 if b % 2 == 0 else NORD9, (bx, by, bar_w, bh), border_radius=3)
 
-        # Fullscreen Hint
-        fs_hint = self._render_cached_text(fs_hint_str, 14, bold=True, color=NORD13)
-        self.screen.blit(fs_hint, (rp_x + (rp_w - fs_hint.get_width()) // 2, rp_y + rp_h - 28))
+        # Studio Telemetry / Audio Pipeline Indicator (Nord8 Cyan)
+        rack_status_str = "MATRIX STEREO • 48 kHz" if self.platform.is_handheld else "KMS/DRM SYNC • 60 FPS"
+        rack_stat_surf = self._render_cached_text(rack_status_str, 13, bold=True, color=NORD8)
+        self.screen.blit(rack_stat_surf, (rp_x + (rp_w - rack_stat_surf.get_width()) // 2, rp_y + rp_h - 28))
 
         # 2. Untere Karte (Card 2): Kompakte Cockpit-Box (Height = 138px)
         card2_x = 20
