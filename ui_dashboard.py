@@ -2021,27 +2021,28 @@ class SNfetchDashboard:
     def _get_tv_logo_overlay_path(self) -> Optional[str]:
         """
         Original dArkOS TV Watermark:
-        Bereitet sn_logo.png mit 175px Breite und 65% Transparenz fuer Hardware-Overlay vor.
-        Wird nach /tmp/sn_logo_overlay.png gecacht, damit mpv 0% CPU verbraucht.
+        sn_logo.png mit 175px Breite und 65% Transparenz (wie in dArkOS ffplay filter).
         """
-        overlay_path = "/tmp/sn_logo_overlay.png"
-        if Path(overlay_path).exists():
-            return overlay_path
+        p = APP_DIR / "assets" / "sn_logo_overlay.png"
+        if p.exists():
+            return str(p)
+        p2 = Path("/tmp/sn_logo_overlay.png")
+        if p2.exists():
+            return str(p2)
         try:
-            from PIL import Image
             src = APP_DIR / "sn_logo.png"
             if not src.exists():
                 src = Path("sn_logo.png").resolve()
             if src.exists():
-                im = Image.open(src).convert("RGBA")
+                raw = pygame.image.load(str(src))
                 w = 175
-                h = int(im.height * (w / im.width))
-                im = im.resize((w, h), Image.Resampling.LANCZOS)
-                r, g, b, a = im.split()
-                a = a.point(lambda p: int(p * 0.65))
-                im = Image.merge("RGBA", (r, g, b, a))
-                im.save(overlay_path)
-                return overlay_path
+                h = int(raw.get_height() * (w / raw.get_width()))
+                scaled = pygame.transform.smoothscale(raw, (w, h))
+                out = pygame.Surface((w, h), pygame.SRCALPHA)
+                scaled.set_alpha(int(255 * 0.65))
+                out.blit(scaled, (0, 0))
+                pygame.image.save(out, str(p2))
+                return str(p2)
         except Exception as e:
             logging.warning(f"Could not prepare logo overlay: {e}")
         return None
@@ -2166,7 +2167,11 @@ class SNfetchDashboard:
                 if logo_overlay:
                     cmd.extend([
                         f"--external-file={logo_overlay}",
-                        "--lavfi-complex=[vid1][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
+                        "--lavfi-complex=[vid1] scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [main]; [main][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
+                    ])
+                else:
+                    cmd.extend([
+                        "--lavfi-complex=[vid1] scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [vo]"
                     ])
                 cmd.append(stream_url)
 
@@ -2359,7 +2364,11 @@ class SNfetchDashboard:
             if logo_overlay:
                 cmd.extend([
                     f"--external-file={logo_overlay}",
-                    "--lavfi-complex=[vid1][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
+                    "--lavfi-complex=[vid1] scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [main]; [main][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
+                ])
+            else:
+                cmd.extend([
+                    "--lavfi-complex=[vid1] scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [vo]"
                 ])
             cmd.append(str(clip_path))
         else:
