@@ -924,6 +924,115 @@ class LinuxGamepadReader:
         return events
 
 # =============================================================================
+# DIRECT EMBEDDED VIDEO PLAYER (PC LINUX / WAYLAND SINGLE-WINDOW ENGINE)
+# =============================================================================
+class DirectVideoPlayer:
+    """Streams decoded video frames directly into Pygame surfaces with synchronized audio.
+    Prevents external windows from spawning on Wayland/KDE/X11 and guarantees 100% single-window playback."""
+    def __init__(self, target_w: int = 620, target_h: int = 460):
+        self.target_w = target_w
+        self.target_h = target_h
+        self.frame_bytes = target_w * target_h * 3
+        self.proc: Optional[subprocess.Popen] = None
+        self.current_surface: Optional[pygame.Surface] = None
+        self.lock = threading.Lock()
+        self.running = False
+        self.is_paused = False
+        self.is_finished = False
+        self._reader_thread: Optional[threading.Thread] = None
+
+    def play(self, stream_url: str):
+        self.stop()
+        self.running = True
+        self.is_finished = False
+        self.is_paused = False
+
+        # Fast probe for audio stream to prevent ffmpeg null mapping errors
+        has_audio = False
+        try:
+            prb = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", stream_url],
+                capture_output=True, text=True, timeout=1.5
+            )
+            has_audio = bool(prb.stdout.strip())
+        except Exception:
+            has_audio = False
+
+        vf = f"scale={self.target_w}:{self.target_h}:force_original_aspect_ratio=decrease,pad={self.target_w}:{self.target_h}:(ow-iw)/2:(oh-ih)/2,format=rgb24"
+        cmd = [
+            "ffmpeg",
+            "-re",
+            "-i", stream_url,
+            "-filter_complex", f"[0:v]{vf}[v]",
+            "-map", "[v]",
+            "-f", "rawvideo",
+            "pipe:1",
+            "-loglevel", "quiet"
+        ]
+        if has_audio:
+            # Route audio to system default sink (PulseAudio / PipeWire / ALSA)
+            cmd.extend(["-map", "0:a", "-f", "pulse", "default"])
+
+        try:
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=self.frame_bytes * 2)
+            self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+            self._reader_thread.start()
+        except Exception as e:
+            logging.error(f"Error starting DirectVideoPlayer: {e}")
+            self.running = False
+            self.is_finished = True
+
+    def _read_loop(self):
+        while self.running and self.proc and self.proc.poll() is None:
+            if self.is_paused:
+                time.sleep(0.04)
+                continue
+            try:
+                raw = self.proc.stdout.read(self.frame_bytes)
+                if not raw or len(raw) < self.frame_bytes:
+                    break
+                surf = pygame.image.frombuffer(raw, (self.target_w, self.target_h), "RGB")
+                with self.lock:
+                    self.current_surface = surf
+            except Exception:
+                break
+        self.is_finished = True
+        self.running = False
+
+    def get_surface(self) -> Optional[pygame.Surface]:
+        with self.lock:
+            return self.current_surface
+
+    def toggle_pause(self):
+        if not self.proc or self.proc.poll() is not None:
+            return
+        self.is_paused = not self.is_paused
+        try:
+            import signal
+            sig = signal.SIGSTOP if self.is_paused else signal.SIGCONT
+            os.kill(self.proc.pid, sig)
+        except Exception:
+            pass
+
+    def stop(self):
+        self.running = False
+        if self.proc:
+            try:
+                import signal
+                if self.is_paused:
+                    os.kill(self.proc.pid, signal.SIGCONT)
+                self.proc.terminate()
+                self.proc.wait(timeout=0.4)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+        with self.lock:
+            self.current_surface = None
+
+# =============================================================================
 # MAIN DASHBOARD APPLICATION
 # =============================================================================
 class SNfetchDashboard:
@@ -1060,6 +1169,15 @@ class SNfetchDashboard:
         self.is_resolving = False
         self.resolve_target_idx = -1
         self.resolve_thread: Optional[threading.Thread] = None
+
+        # Direct Embedded Video Engine (PC Single-Window Studio Deck)
+        self.is_tv_playing = False
+        self.is_tv_fullscreen = False
+        self.tv_osd_visible = True
+        self.tv_osd_last_interaction = 0.0
+        self.direct_video_player: Optional[DirectVideoPlayer] = None
+        if self.platform.is_pc:
+            self.direct_video_player = DirectVideoPlayer(target_w=620, target_h=460)
 
         self.settings_cursor = 0
         self.settings_column = 0  # 0 = Left Settings, 1 = Right Handbook
@@ -2199,6 +2317,13 @@ class SNfetchDashboard:
                         except Exception:
                             pass
 
+    def stop_tv_video(self):
+        with self._audio_lock:
+            self._resolve_id += 1
+            if self.direct_video_player:
+                self.direct_video_player.stop()
+            self.is_tv_playing = False
+
     def _start_audio_reader(self):
         if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP:
             if self.audio_tap_proc and self.audio_tap_proc.poll() is None:
@@ -2446,6 +2571,61 @@ class SNfetchDashboard:
                 self._start_audio_reader()
         except Exception as e:
             print(f"Playback error: {e}")
+        finally:
+            if self._resolve_id == req_id:
+                self.is_resolving = False
+
+    def trigger_play_tv_track_async(self, idx: int):
+        """Asynchronously starts direct video playback inside Card 1 (Studio Deck) on PC"""
+        with self._audio_lock:
+            self.stop_audio()
+            self.stop_tv_video()
+            curr_id = self._resolve_id
+            self.resolve_target_idx = idx
+            self.is_resolving = True
+            self.is_tv_playing = True
+        self.resolve_thread = threading.Thread(target=self._resolve_and_play_tv_worker, args=(idx, curr_id), daemon=True)
+        self.resolve_thread.start()
+
+    def _resolve_and_play_tv_worker(self, idx: int, req_id: int):
+        try:
+            if idx < 0 or idx >= len(self.playlist):
+                return
+            if self.state != STATE_TV or self._resolve_id != req_id:
+                return
+
+            track = self.playlist[idx]
+            local_path = track.get("path") or track.get("file")
+            stream_url = None
+
+            if local_path and Path(local_path).exists():
+                stream_url = str(Path(local_path).resolve())
+            elif track.get("youtubeId") and (Path(str(track.get("youtubeId"))).exists() or str(track.get("youtubeId")).startswith("/") or str(track.get("youtubeId")).startswith(".")):
+                if Path(str(track.get("youtubeId"))).exists():
+                    stream_url = str(Path(str(track.get("youtubeId"))).resolve())
+
+            if not stream_url:
+                yt_id = track.get("youtubeId")
+                cache_key = f"{yt_id}_TV"
+                if cache_key in self._prefetched_cache:
+                    cached_url, exp = self._prefetched_cache[cache_key]
+                    if time.time() < exp:
+                        stream_url = cached_url
+                if not stream_url and yt_id:
+                    stream_url, _ = get_stream(yt_id, prefer_audio_only=False)
+                    if stream_url:
+                        self._prefetched_cache[cache_key] = (stream_url, time.time() + 14400)
+
+            if stream_url and self.state == STATE_TV and self._resolve_id == req_id:
+                self.current_idx = idx
+                self.cursor_idx = idx
+                self._update_quote()
+                if self.direct_video_player:
+                    self.direct_video_player.play(stream_url)
+                self.is_tv_playing = True
+                self._trigger_prefetch_next_track(idx, is_tv=True)
+        except Exception as e:
+            logging.error(f"TV Playback error: {e}")
         finally:
             if self._resolve_id == req_id:
                 self.is_resolving = False
@@ -3377,6 +3557,8 @@ class SNfetchDashboard:
             {"col": NORD13, "title": "Repeat Loop"}
         ]
 
+        scale = 0.7 if height < 80 else (0.85 if height < 115 else 1.0)
+
         for i, btn in enumerate(buttons):
             bx = x + i * (btn_w + gap)
             b_rect = pygame.Rect(bx, y, btn_w, height)
@@ -3384,16 +3566,16 @@ class SNfetchDashboard:
             icon_col = NORD0 # Dark Polar Night charcoal
 
             # 1. Pastel Pill Surface
-            pygame.draw.rect(surface, btn["col"], b_rect, border_radius=14)
+            pygame.draw.rect(surface, btn["col"], b_rect, border_radius=14 if height >= 80 else 10)
 
             # 2. Glowing Android TV Focus Border
             if is_focused:
-                pygame.draw.rect(surface, NORD6, (bx - 3, y - 3, btn_w + 6, height + 6), width=3, border_radius=16)
-                pygame.draw.rect(surface, NORD8, (bx - 5, y - 5, btn_w + 10, height + 10), width=2, border_radius=18)
+                pygame.draw.rect(surface, NORD6, (bx - 3, y - 3, btn_w + 6, height + 6), width=3, border_radius=16 if height >= 80 else 12)
+                pygame.draw.rect(surface, NORD8, (bx - 5, y - 5, btn_w + 10, height + 10), width=2, border_radius=18 if height >= 80 else 14)
 
             # 3. Active Repeat Border
             if i == 4 and self.shuffle_mgr.is_repeat_mode:
-                pygame.draw.rect(surface, NORD6, b_rect, width=3, border_radius=14)
+                pygame.draw.rect(surface, NORD6, b_rect, width=3, border_radius=14 if height >= 80 else 10)
 
             # 4. Geometric Vector Icons (Centered in Button)
             cx = bx + btn_w // 2
@@ -3401,9 +3583,9 @@ class SNfetchDashboard:
 
             if i == 0:
                 # Fullscreen: 4 Expanding Corner Brackets
-                d = 16
-                arm = 9
-                w = 4
+                d = int(16 * scale)
+                arm = max(5, int(9 * scale))
+                w = max(2, int(4 * scale))
                 # Top-Left
                 pygame.draw.line(surface, icon_col, (cx - d, cy - d), (cx - d + arm, cy - d), w)
                 pygame.draw.line(surface, icon_col, (cx - d, cy - d), (cx - d, cy - d + arm), w)
@@ -3419,34 +3601,44 @@ class SNfetchDashboard:
 
             elif i == 1:
                 # Previous Track: Vertical bar + Left-pointing triangle (|◄)
-                pygame.draw.rect(surface, icon_col, (cx - 16, cy - 16, 5, 32), border_radius=1)
-                pts = [(cx - 12, cy), (cx + 14, cy - 16), (cx + 14, cy + 16)]
+                bw = max(3, int(5 * scale))
+                h2 = int(16 * scale)
+                w2 = int(14 * scale)
+                pygame.draw.rect(surface, icon_col, (cx - int(16 * scale), cy - h2, bw, h2 * 2), border_radius=1)
+                pts = [(cx - int(12 * scale), cy), (cx + w2, cy - h2), (cx + w2, cy + h2)]
                 pygame.draw.polygon(surface, icon_col, pts)
 
             elif i == 2:
                 # Play / Pause
-                if self.is_playing:
+                is_active_play = (self.is_tv_playing and (not self.direct_video_player or not self.direct_video_player.is_paused)) if self.state == STATE_TV else self.is_playing
+                h2 = int(16 * scale)
+                if is_active_play:
                     # Pause: Twin vertical bars (||)
-                    pygame.draw.rect(surface, icon_col, (cx - 12, cy - 16, 8, 32), border_radius=2)
-                    pygame.draw.rect(surface, icon_col, (cx + 4, cy - 16, 8, 32), border_radius=2)
+                    bw = max(4, int(8 * scale))
+                    pygame.draw.rect(surface, icon_col, (cx - int(12 * scale), cy - h2, bw, h2 * 2), border_radius=2)
+                    pygame.draw.rect(surface, icon_col, (cx + int(4 * scale), cy - h2, bw, h2 * 2), border_radius=2)
                 else:
                     # Play: Right-pointing triangle (▶)
-                    pts = [(cx - 10, cy - 16), (cx + 16, cy), (cx - 10, cy + 16)]
+                    pts = [(cx - int(10 * scale), cy - h2), (cx + int(16 * scale), cy), (cx - int(10 * scale), cy + h2)]
                     pygame.draw.polygon(surface, icon_col, pts)
 
             elif i == 3:
                 # Next Track: Triangle pointing right + Vertical bar (►|)
-                pts = [(cx - 14, cy - 16), (cx + 12, cy), (cx - 14, cy + 16)]
+                bw = max(3, int(5 * scale))
+                h2 = int(16 * scale)
+                w2 = int(14 * scale)
+                pts = [(cx - w2, cy - h2), (cx + int(12 * scale), cy), (cx - w2, cy + h2)]
                 pygame.draw.polygon(surface, icon_col, pts)
-                pygame.draw.rect(surface, icon_col, (cx + 12, cy - 16, 5, 32), border_radius=1)
+                pygame.draw.rect(surface, icon_col, (cx + int(12 * scale), cy - h2, bw, h2 * 2), border_radius=1)
 
             elif i == 4:
                 # Repeat Loop
-                rx = cx - 18
-                ry = cy - 13
-                rw = 36
-                rh = 26
-                lw = 3
+                rx = cx - int(18 * scale)
+                ry = cy - int(13 * scale)
+                rw = int(36 * scale)
+                rh = int(26 * scale)
+                lw = max(2, int(3 * scale))
+                ah = max(4, int(6 * scale))
                 # Top horizontal
                 pygame.draw.line(surface, icon_col, (rx, ry), (rx + rw, ry), lw)
                 # Right vertical
@@ -3456,13 +3648,13 @@ class SNfetchDashboard:
                 # Left vertical
                 pygame.draw.line(surface, icon_col, (rx, ry + rh), (rx, ry), lw)
                 # Arrowhead top right (pointing right)
-                pygame.draw.polygon(surface, icon_col, [(rx + rw, ry - 6), (rx + rw + 8, ry), (rx + rw, ry + 6)])
+                pygame.draw.polygon(surface, icon_col, [(rx + rw, ry - ah), (rx + rw + int(8 * scale), ry), (rx + rw, ry + ah)])
                 # Arrowhead bottom left (pointing left)
-                pygame.draw.polygon(surface, icon_col, [(rx, ry + rh - 6), (rx - 8, ry + rh), (rx, ry + rh + 6)])
+                pygame.draw.polygon(surface, icon_col, [(rx, ry + rh - ah), (rx - int(8 * scale), ry + rh), (rx, ry + rh + ah)])
 
                 # "1" inside badge if loop mode is active
                 if self.shuffle_mgr.is_repeat_mode:
-                    one_surf = self._render_cached_text("1", 14, bold=True, color=icon_col)
+                    one_surf = self._render_cached_text("1", max(10, int(14 * scale)), bold=True, color=icon_col)
                     surface.blit(one_surf, (cx - one_surf.get_width() // 2, cy - one_surf.get_height() // 2))
 
     # =========================================================================
@@ -4024,7 +4216,14 @@ class SNfetchDashboard:
         """Full 1024x768 Zen Visualizer screen for ambient desk listening"""
         self.screen.fill(NORD0)
 
-        # 1. Fullscreen Visualizer across bottom 440px
+        # 1. Fullscreen Visualizer across bottom 440px with retro spinning vinyl background
+        if hasattr(self, "_vinyl_frames") and self._vinyl_frames:
+            if self.is_playing:
+                frame_idx = int((time.time() * 20.0) % len(self._vinyl_frames))
+            else:
+                frame_idx = 0
+            self.screen.blit(self._vinyl_frames[frame_idx], (SCREEN_WIDTH // 2 - 340, 360))
+
         self.visualizer.update(is_active=self.is_playing)
         self.visualizer.draw(self.screen, x=32, y=260, width=960, max_h=440)
 
@@ -4213,79 +4412,177 @@ class SNfetchDashboard:
     # RENDERER 4: TV MODE (TELEVISION BROADCAST - 2-CARD STAGE)
     # =========================================================================
     def draw_tv_dashboard(self):
+        if self.is_tv_fullscreen and self.platform.is_pc:
+            self.draw_tv_fullscreen()
+            return
+
         self.screen.fill(NORD0)
-        self.draw_top_bar(custom_title="STATION NORTH • TV", subtitle="TELEVISION BROADCAST • 4:3 CRT MODE")
+        self.draw_top_bar(custom_title="STATION NORTH • TV", subtitle="STUDIO BROADCAST • LIVE CRT DECK")
 
         track = self.playlist[self.current_idx] if self.current_idx < len(self.playlist) else {}
         title = track.get("title", "Unknown Title")
-        artist = track.get("artist", "Unknown Artist")
+        artist = track.get("artist", "The Queen's Frequency")
         yt_id = track.get("youtubeId", "")
 
-        # 1. Obere Karte: Großes Video-Thumbnail & Fullscreen-Trigger
+        # 1. Obere Karte (Card 1): Studio Upper Deck (Height = 496px)
         card1_x = 20
-        card1_y = 66
+        card1_y = 64
         card1_w = 984
-        card1_h = 368
+        card1_h = 496
         card1_rect = pygame.Rect(card1_x, card1_y, card1_w, card1_h)
-
         pygame.draw.rect(self.screen, NORD1, card1_rect, border_radius=16)
         pygame.draw.rect(self.screen, NORD2, card1_rect, width=1, border_radius=16)
 
-        thumb_surf = self.thumb_mgr.get_thumbnail(yt_id, title, size=(card1_w, card1_h))
-        self.screen.blit(thumb_surf, (card1_x, card1_y))
+        # Left: Video Monitor Window (620x460)
+        vm_x = card1_x + 18
+        vm_y = card1_y + 18
+        vid_w = 620
+        vid_h = 460
+        vm_rect = pygame.Rect(vm_x, vm_y, vid_w, vid_h)
+        pygame.draw.rect(self.screen, (20, 24, 32), (vm_x - 2, vm_y - 2, vid_w + 4, vid_h + 4), border_radius=10)
 
-        # Dezent abgedunkelter Scrim für maximale Textlesbarkeit
-        scrim = pygame.Surface((card1_w, card1_h), pygame.SRCALPHA)
-        scrim.fill((0, 0, 0, 85))
-        self.screen.blit(scrim, (card1_x, card1_y))
+        # Draw Live Video Frame or Fallback/Thumbnail
+        frame_surf = self.direct_video_player.get_surface() if (self.direct_video_player and self.is_tv_playing) else None
+        if frame_surf:
+            self.screen.blit(frame_surf, (vm_x, vm_y))
+        else:
+            thumb_surf = self.thumb_mgr.get_thumbnail(yt_id, title, size=(vid_w, vid_h))
+            self.screen.blit(thumb_surf, (vm_x, vm_y))
+            scrim = pygame.Surface((vid_w, vid_h), pygame.SRCALPHA)
+            scrim.fill((0, 0, 0, 95))
+            self.screen.blit(scrim, (vm_x, vm_y))
 
-        cx = card1_x + card1_w // 2
+            # Centered status
+            if self.is_resolving:
+                txt_s = self._render_cached_text("TUNING SATELLITE FEED...", 22, bold=True, color=NORD8)
+            else:
+                txt_s = self._render_cached_text("PRESS PLAY OR [0] FOR FULLSCREEN", 18, bold=True, color=NORD6)
+            self.screen.blit(txt_s, (vm_x + (vid_w - txt_s.get_width()) // 2, vm_y + vid_h // 2 - 10))
 
-        # "PRESS for FULLSCREEN" zentriert
-        p_sh = self._render_cached_text("PRESS for", 36, bold=True, color=(15, 18, 24))
-        f_sh = self._render_cached_text("FULLSCREEN", 56, bold=True, color=(15, 18, 24))
-        self.screen.blit(p_sh, (cx - p_sh.get_width() // 2 + 2, card1_y + 112))
-        self.screen.blit(f_sh, (cx - f_sh.get_width() // 2 + 3, card1_y + 162))
+        # Inner CRT Border
+        pygame.draw.rect(self.screen, NORD3, vm_rect, width=2, border_radius=8)
 
-        p_s = self._render_cached_text("PRESS for", 36, bold=True, color=NORD6)
-        f_s = self._render_cached_text("FULLSCREEN", 56, bold=True, color=NORD6)
-        self.screen.blit(p_s, (cx - p_s.get_width() // 2, card1_y + 110))
-        self.screen.blit(f_s, (cx - f_s.get_width() // 2, card1_y + 160))
+        # Right: Studio Rack Area (Width = 310px)
+        rp_x = vm_x + vid_w + 18
+        rp_w = card1_w - (rp_x - card1_x) - 18
+        rp_y = vm_y
+        rp_h = vid_h
+        rp_rect = pygame.Rect(rp_x, rp_y, rp_w, rp_h)
+        pygame.draw.rect(self.screen, (46, 52, 64), rp_rect, border_radius=12)
+        pygame.draw.rect(self.screen, NORD2, rp_rect, width=1, border_radius=12)
 
-        # SN Wasserzeichen unten rechts
-        if self.logo_tv_wm:
-            wm_w, wm_h = 76, 76
-            self.screen.blit(self.logo_tv_wm, (card1_x + card1_w - wm_w - 24, card1_y + card1_h - wm_h - 22))
-            wm_txt = self._render_cached_text("Station North", 15, bold=True, color=(220, 220, 220))
-            self.screen.blit(wm_txt, (card1_x + card1_w - wm_txt.get_width() - 24, card1_y + card1_h - 22))
+        # Mini Spinning Vinyl Record in Deck
+        disc_center = (rp_x + rp_w // 2, rp_y + 90)
+        pygame.draw.circle(self.screen, (15, 18, 22), disc_center, 65)
+        pygame.draw.circle(self.screen, (35, 40, 50), disc_center, 60, width=2)
+        pygame.draw.circle(self.screen, (25, 30, 38), disc_center, 46, width=1)
+        pygame.draw.circle(self.screen, (35, 40, 50), disc_center, 32, width=1)
 
-        # 2. Untere Karte: Titel, Artist & 5 Große Chunky Buttons
+        # Vinyl center label with smooth rotation angle indicator if active
+        pygame.draw.circle(self.screen, NORD8, disc_center, 20)
+        pygame.draw.circle(self.screen, (20, 24, 30), disc_center, 4)
+        if self.is_tv_playing and (not self.direct_video_player or not self.direct_video_player.is_paused):
+            rot_deg = (time.time() * 180.0) % 360.0
+            r_rad = math.radians(rot_deg)
+            lx = disc_center[0] + int(12 * math.cos(r_rad))
+            ly = disc_center[1] + int(12 * math.sin(r_rad))
+            pygame.draw.circle(self.screen, (255, 255, 255), (lx, ly), 3)
+
+        # Studio Feed Status
+        stat_y = rp_y + 175
+        sn_tag = self._render_cached_text("STUDIO FEED", 24, bold=True, color=NORD6)
+        self.screen.blit(sn_tag, (rp_x + (rp_w - sn_tag.get_width()) // 2, stat_y))
+
+        stat_sub = self._render_cached_text("CH-01 • DIRECT CRT", 16, bold=True, color=NORD14)
+        self.screen.blit(stat_sub, (rp_x + (rp_w - stat_sub.get_width()) // 2, stat_y + 26))
+
+        # Compact Audio Visualizer Bars
+        vis_y = rp_y + 236
+        vis_h = 136
+        vis_w = rp_w - 32
+        vis_x = rp_x + 16
+        pygame.draw.rect(self.screen, (36, 41, 51), (vis_x, vis_y, vis_w, vis_h), border_radius=8)
+
+        num_bars = 16
+        bar_w = (vis_w - (num_bars - 1) * 3) // num_bars
+        is_active_vis = self.is_tv_playing and (not self.direct_video_player or not self.direct_video_player.is_paused)
+        for b in range(num_bars):
+            if is_active_vis:
+                bh = int(22 + 65 * (math.sin(time.time() * 5.2 + b * 0.42) ** 2))
+            else:
+                bh = 8
+            bx = vis_x + b * (bar_w + 3)
+            by = vis_y + vis_h - bh - 6
+            pygame.draw.rect(self.screen, NORD8 if b % 2 == 0 else NORD9, (bx, by, bar_w, bh), border_radius=3)
+
+        # Fullscreen Hint
+        fs_hint = self._render_cached_text("DOUBLE-CLICK / [0] FOR FULLSCREEN", 14, bold=True, color=NORD13)
+        self.screen.blit(fs_hint, (rp_x + (rp_w - fs_hint.get_width()) // 2, rp_y + rp_h - 28))
+
+        # 2. Untere Karte (Card 2): Kompakte Cockpit-Box (Height = 130px)
         card2_x = 20
-        card2_y = 448
+        card2_y = 574
         card2_w = 984
-        card2_h = 260
+        card2_h = 130
         pygame.draw.rect(self.screen, NORD1, (card2_x, card2_y, card2_w, card2_h), border_radius=16)
         pygame.draw.rect(self.screen, NORD2, (card2_x, card2_y, card2_w, card2_h), width=1, border_radius=16)
 
-        title_size = 24 if len(title) > 34 else 30
+        title_size = 22 if len(title) > 38 else 26
         t_surf = self._render_cached_text(title, title_size, bold=True, color=NORD6)
-        self.screen.blit(t_surf, (cx - t_surf.get_width() // 2, card2_y + 14))
+        self.screen.blit(t_surf, (card2_x + 24, card2_y + 10))
 
-        a_surf = self._render_cached_text(artist, 20, bold=True, color=NORD4)
-        self.screen.blit(a_surf, (cx - a_surf.get_width() // 2, card2_y + 50))
+        a_surf = self._render_cached_text(f"{artist} • Television Broadcast", 18, bold=True, color=NORD4)
+        self.screen.blit(a_surf, (card2_x + 24, card2_y + 34))
 
+        # 5 Kompakte Cockpit-Buttons (Height = 62px)
         btn_area_x = card2_x + 16
         btn_area_w = card2_w - 32
-        btn_y = card2_y + 90
-        self.draw_5_button_cockpit(self.screen, btn_area_x, btn_y, btn_area_w, height=155)
+        btn_y = card2_y + 58
+        self.draw_5_button_cockpit(self.screen, btn_area_x, btn_y, btn_area_w, height=62)
 
         # Harmonized Bottom Bar with Pills
         tv_pills = [
-            ("A", "Launch Fullscreen", NORD8),
+            ("A / [0]", "Zoom Fullscreen", NORD8),
             ("◄/►", "Channel", NORD14),
             ("B", "Main Menu", NORD11)
         ]
         self.draw_bottom_bar(pills=tv_pills, right_text="Station North • Television")
+
+    def draw_tv_fullscreen(self):
+        """Fullscreen 1024x768 video presentation with floating auto-hiding 5-button cockpit overlay"""
+        self.screen.fill((0, 0, 0))
+
+        frame_surf = self.direct_video_player.get_surface() if (self.direct_video_player and self.is_tv_playing) else None
+        if frame_surf:
+            scaled = pygame.transform.scale(frame_surf, (SCREEN_WIDTH, SCREEN_HEIGHT))
+            self.screen.blit(scaled, (0, 0))
+        else:
+            track = self.playlist[self.current_idx] if self.current_idx < len(self.playlist) else {}
+            title = track.get("title", "Unknown Title")
+            yt_id = track.get("youtubeId", "")
+            thumb_surf = self.thumb_mgr.get_thumbnail(yt_id, title, size=(SCREEN_WIDTH, SCREEN_HEIGHT))
+            self.screen.blit(thumb_surf, (0, 0))
+
+        # Auto-hide overlay check after 3.5s of inactivity
+        if time.time() - self.tv_osd_last_interaction > 3.5:
+            self.tv_osd_visible = False
+
+        if self.tv_osd_visible:
+            # Floating Cockpit Overlay
+            card_w = 900
+            card_h = 136
+            card_x = (SCREEN_WIDTH - card_w) // 2
+            card_y = 596
+
+            osd_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+            pygame.draw.rect(osd_surf, (46, 52, 64, 235), (0, 0, card_w, card_h), border_radius=18)
+            pygame.draw.rect(osd_surf, (67, 76, 94, 255), (0, 0, card_w, card_h), width=2, border_radius=18)
+            self.screen.blit(osd_surf, (card_x, card_y))
+
+            self.draw_5_button_cockpit(self.screen, card_x + 16, card_y + 14, card_w - 32, height=108)
+        else:
+            hint_s = self._render_cached_text("PRESS [0] OR [ESC] TO EXIT FULLSCREEN • MOVE MOUSE FOR CONTROLS", 13, bold=False, color=NORD3)
+            self.screen.blit(hint_s, ((SCREEN_WIDTH - hint_s.get_width()) // 2, 742))
 
     def _trigger_cockpit_action(self, idx: int):
         """Executes the action of the focused button (Android TV navigation model)"""
@@ -4296,7 +4593,12 @@ class SNfetchDashboard:
                 self.radio_osd_visible = True
                 self.radio_osd_last_interaction = time.time()
             elif self.state == STATE_TV:
-                self.launch_video_playback(self.current_idx, manual_trigger=True)
+                if self.platform.is_pc:
+                    self.is_tv_fullscreen = not self.is_tv_fullscreen
+                    self.tv_osd_visible = True
+                    self.tv_osd_last_interaction = time.time()
+                else:
+                    self.launch_video_playback(self.current_idx, manual_trigger=True)
 
         elif idx == 1:
             # Previous Track
@@ -4304,7 +4606,10 @@ class SNfetchDashboard:
             if self.state == STATE_RADIO:
                 self.trigger_play_track_async(self.current_idx)
             elif self.state == STATE_TV:
-                self._update_quote()
+                if self.platform.is_pc:
+                    self.trigger_play_tv_track_async(self.current_idx)
+                else:
+                    self._update_quote()
 
         elif idx == 2:
             # Play / Pause
@@ -4314,7 +4619,14 @@ class SNfetchDashboard:
                 else:
                     self.trigger_play_track_async(self.current_idx)
             elif self.state == STATE_TV:
-                self.launch_video_playback(self.current_idx, manual_trigger=True)
+                if self.platform.is_pc:
+                    if self.direct_video_player and self.direct_video_player.running:
+                        self.direct_video_player.toggle_pause()
+                        self.is_tv_playing = not self.direct_video_player.is_paused
+                    else:
+                        self.trigger_play_tv_track_async(self.current_idx)
+                else:
+                    self.launch_video_playback(self.current_idx, manual_trigger=True)
 
         elif idx == 3:
             # Next Track (increments station jingle counter!)
@@ -4323,7 +4635,10 @@ class SNfetchDashboard:
             if self.state == STATE_RADIO:
                 self.trigger_play_track_async(self.current_idx)
             elif self.state == STATE_TV:
-                self._update_quote()
+                if self.platform.is_pc:
+                    self.trigger_play_tv_track_async(self.current_idx)
+                else:
+                    self._update_quote()
 
         elif idx == 4:
             # Repeat Loop Toggle
@@ -4861,12 +5176,19 @@ class SNfetchDashboard:
                     return True
                 elif self.splash_cursor == 1:
                     self._load_active_playlist(is_tv=True)
-                    self.launch_video_playback(self.current_idx, manual_trigger=True)
-                    self.state = STATE_SPLASH
-                    self.splash_enter_time = time.time()
-                    self._state_transition_time = time.time()
-                    pygame.event.clear()
-                    return True
+                    if self.platform.is_pc:
+                        self.state = STATE_TV
+                        self._state_transition_time = time.time()
+                        pygame.event.clear()
+                        self.trigger_play_tv_track_async(self.current_idx)
+                        return True
+                    else:
+                        self.launch_video_playback(self.current_idx, manual_trigger=True)
+                        self.state = STATE_SPLASH
+                        self.splash_enter_time = time.time()
+                        self._state_transition_time = time.time()
+                        pygame.event.clear()
+                        return True
                 elif self.splash_cursor == 2:
                     self.state = STATE_CHRONICLES
                     self._state_transition_time = time.time()
@@ -4954,8 +5276,15 @@ class SNfetchDashboard:
                 self.trigger_play_track_async(self.current_idx)
             return True
 
-        # --- TV MODE (ANDROID TV D-PAD FOCUS CURSOR) ---
+        # --- TV MODE (ANDROID TV D-PAD FOCUS CURSOR & STUDIO DECK) ---
         elif self.state == STATE_TV:
+            if self.is_tv_fullscreen:
+                self.tv_osd_visible = True
+                self.tv_osd_last_interaction = time.time()
+                if key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_BACKSPACE, pygame.K_b, pygame.K_0, pygame.K_KP0, pygame.K_f):
+                    self.is_tv_fullscreen = False
+                    return True
+
             if key == pygame.K_LEFT:
                 self.cockpit_focus_idx = (self.cockpit_focus_idx - 1) % 5
             elif key == pygame.K_RIGHT:
@@ -4963,25 +5292,31 @@ class SNfetchDashboard:
             elif key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_KP_ENTER, pygame.K_a):
                 self._trigger_cockpit_action(self.cockpit_focus_idx)
             elif key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_BACKSPACE, pygame.K_b):
+                self.stop_tv_video()
                 self.state = STATE_SPLASH
                 self.splash_enter_time = time.time()
                 self._state_transition_time = time.time()
                 pygame.event.clear()
                 return True
-            elif key in (pygame.K_f, pygame.K_x):
+            elif key in (pygame.K_0, pygame.K_KP0, pygame.K_f, pygame.K_x):
                 self._trigger_cockpit_action(0)
             elif key in (pygame.K_p, pygame.K_PAUSE):
                 self._trigger_cockpit_action(2)
             elif key == pygame.K_y:
                 self._trigger_cockpit_action(4)
             elif key == pygame.K_UP:
-                self.station_mgr.increment_counter()
-                self.current_idx = self.shuffle_mgr.advance_previous()
-                self._update_quote()
+                self.current_idx = self.shuffle_mgr.step_prev()
+                if self.platform.is_pc:
+                    self.trigger_play_tv_track_async(self.current_idx)
+                else:
+                    self._update_quote()
             elif key == pygame.K_DOWN:
                 self.station_mgr.increment_counter()
                 self.current_idx = self.shuffle_mgr.advance_next()
-                self._update_quote()
+                if self.platform.is_pc:
+                    self.trigger_play_tv_track_async(self.current_idx)
+                else:
+                    self._update_quote()
             return True
 
         # --- CHRONICLES ---
@@ -5068,8 +5403,8 @@ class SNfetchDashboard:
             if pygame.Rect(start_x + 3 * (card_w + gap), card_y + right_card_h + gap, right_col_w, right_card_h).collidepoint(mx, my):
                 return True
 
-        elif self.state in (STATE_RADIO, STATE_TV):
-            # Card 1 (Disc area or Video Thumbnail)
+        elif self.state == STATE_RADIO:
+            # Card 1 (Disc area or Visualizer)
             if pygame.Rect(20, 66, 984, 368).collidepoint(mx, my):
                 return True
             # Card 2 (5 Cockpit Buttons)
@@ -5077,6 +5412,30 @@ class SNfetchDashboard:
             btn_area_w = 952
             btn_y = 538
             btn_h = 155
+            gap = 14
+            btn_w = (btn_area_w - 4 * gap) // 5
+            if btn_y <= my <= btn_y + btn_h and btn_area_x <= mx <= btn_area_x + btn_area_w:
+                for i in range(5):
+                    bx = btn_area_x + i * (btn_w + gap)
+                    if bx <= mx <= bx + btn_w:
+                        return True
+
+        elif self.state == STATE_TV:
+            if self.is_tv_fullscreen:
+                card_w = 900
+                card_h = 136
+                card_x = (SCREEN_WIDTH - card_w) // 2
+                card_y = 596
+                return pygame.Rect(card_x, card_y, card_w, card_h).collidepoint(mx, my)
+
+            # Card 1 (Video Monitor Screen)
+            if pygame.Rect(38, 82, 620, 460).collidepoint(mx, my):
+                return True
+            # Card 2 (5 Compact Cockpit Buttons)
+            btn_area_x = 36
+            btn_area_w = 952
+            btn_y = 632
+            btn_h = 62
             gap = 14
             btn_w = (btn_area_w - 4 * gap) // 5
             if btn_y <= my <= btn_y + btn_h and btn_area_x <= mx <= btn_area_x + btn_area_w:
@@ -5166,21 +5525,47 @@ class SNfetchDashboard:
                         return
 
         elif self.state == STATE_TV:
+            if self.is_tv_fullscreen:
+                self.tv_osd_visible = True
+                self.tv_osd_last_interaction = time.time()
+                card_w = 900
+                card_h = 136
+                card_x = (SCREEN_WIDTH - card_w) // 2
+                card_y = 596
+                btn_area_x = card_x + 16
+                btn_area_w = card_w - 32
+                btn_y = card_y + 14
+                btn_h = 108
+                gap = 14
+                btn_w = (btn_area_w - 4 * gap) // 5
+                if btn_y <= my <= btn_y + btn_h and btn_area_x <= mx <= btn_area_x + btn_area_w:
+                    for i in range(5):
+                        bx = btn_area_x + i * (btn_w + gap)
+                        if bx <= mx <= bx + btn_w:
+                            self.cockpit_focus_idx = i
+                            self._trigger_cockpit_action(i)
+                            return
+                elif my < 580:
+                    # Clicking video area in fullscreen toggles fullscreen back to studio deck
+                    self.is_tv_fullscreen = False
+                return
+
             if my > 700 and mx < 240:
                 self._handle_action_key(pygame.K_ESCAPE)
                 return
 
-            # Card 1: Video Thumbnail -> Start Video Playback
-            card1_rect = pygame.Rect(20, 66, 984, 368)
-            if card1_rect.collidepoint(mx, my):
-                self._handle_action_key(pygame.K_RETURN)
+            # Card 1 Left: Video Monitor Window -> Toggle Fullscreen
+            vm_rect = pygame.Rect(38, 82, 620, 460)
+            if vm_rect.collidepoint(mx, my):
+                self._trigger_cockpit_action(0)
                 return
 
-            # Card 2: 5 Cockpit Buttons
+            # Card 2: 5 Compact Cockpit Buttons (Height = 62px)
+            card2_y = 574
             btn_area_x = 36
             btn_area_w = 952
-            btn_y = 538
-            btn_h = 155
+            btn_y = card2_y + 58
+            btn_h = 62
             gap = 14
             btn_w = (btn_area_w - 4 * gap) // 5
             if btn_y <= my <= btn_y + btn_h and btn_area_x <= mx <= btn_area_x + btn_area_w:
@@ -5271,6 +5656,9 @@ class SNfetchDashboard:
                         self._handle_mouse_click(event.pos[0], event.pos[1])
 
                 elif event.type == pygame.MOUSEMOTION:
+                    if self.state == STATE_TV and self.is_tv_fullscreen:
+                        self.tv_osd_visible = True
+                        self.tv_osd_last_interaction = time.time()
                     is_hover = self._is_mouse_over_interactive_element(event.pos[0], event.pos[1])
                     pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_HAND if is_hover else pygame.SYSTEM_CURSOR_ARROW)
 
@@ -5347,6 +5735,10 @@ class SNfetchDashboard:
                     self.draw_radio_dashboard()
             elif self.state == STATE_TV:
                 self.draw_tv_dashboard()
+                if self.platform.is_pc and self.direct_video_player and self.direct_video_player.is_finished:
+                    self.station_mgr.increment_counter()
+                    self.current_idx = self.shuffle_mgr.advance_next()
+                    self.trigger_play_tv_track_async(self.current_idx)
             elif self.state == STATE_CHRONICLES:
                 self.draw_chronicles_screen()
             elif self.state == STATE_SETTINGS:
@@ -5360,6 +5752,7 @@ class SNfetchDashboard:
         if hasattr(self, "_stop_adc_listener") and self._stop_adc_listener:
             self._stop_adc_listener.set()
         self.stop_audio()
+        self.stop_tv_video()
         self.stop_chronicles_audio()
         pygame.quit()
         sys.exit(0)
