@@ -25,6 +25,7 @@ import os
 import json
 import time
 import math
+import struct
 import random
 import threading
 import subprocess
@@ -388,7 +389,7 @@ class IntegratedVisualizer:
             sample_count = len(pcm_bytes) // 2
             if sample_count < n:
                 return
-            raw = struct.unpack(f"<{n}h", pcm_bytes[:n*2])
+            raw = struct.unpack(f"<{n}h", pcm_bytes[-n*2:])
 
             # Apply Hann window & bit reversal permutation
             re = [raw[self._rev[i]] * self._hann[self._rev[i]] for i in range(n)]
@@ -1784,9 +1785,16 @@ class SNfetchDashboard:
                 self.audio_tap_proc = None
 
             env = dict(os.environ)
-            if "XDG_RUNTIME_DIR" not in env or not os.path.exists(env["XDG_RUNTIME_DIR"]):
-                if os.path.exists("/var/run/0-runtime-dir"):
-                    env["XDG_RUNTIME_DIR"] = "/var/run/0-runtime-dir"
+            xdg = env.get("XDG_RUNTIME_DIR")
+            if not xdg or not os.path.exists(xdg):
+                for cand in ["/var/run/0-runtime-dir", "/run/0-runtime-dir", "/run/user/0"]:
+                    if os.path.exists(cand):
+                        env["XDG_RUNTIME_DIR"] = cand
+                        break
+            if "XDG_RUNTIME_DIR" in env:
+                pulse_sock = os.path.join(env["XDG_RUNTIME_DIR"], "pulse", "native")
+                if os.path.exists(pulse_sock):
+                    env["PULSE_SERVER"] = f"unix:{pulse_sock}"
             try:
                 cmd = [
                     "parec",
