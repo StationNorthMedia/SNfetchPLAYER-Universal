@@ -1100,6 +1100,90 @@ class DirectVideoPlayer:
         self.is_paused = False
 
 # =============================================================================
+# PC TV COMPANION CLIENT (PYQT6 + LIBMPV GPU-ACCELERATED COMPANION WINDOW)
+# =============================================================================
+class CompanionTVClient:
+    """Manages the persistent lifecycle and JSON-IPC communication with companion_tv.py."""
+    def __init__(self, callback_event=None):
+        self.proc: Optional[subprocess.Popen] = None
+        self.callback_event = callback_event
+        self._reader_thread: Optional[threading.Thread] = None
+        self.is_paused = False
+        self.is_running = False
+
+    def ensure_running(self):
+        if self.proc and self.proc.poll() is None:
+            return
+        companion_path = Path(__file__).resolve().parent / "companion_tv.py"
+        python_bin = sys.executable
+        try:
+            self.proc = subprocess.Popen(
+                [python_bin, str(companion_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True
+            )
+            self.is_running = True
+            self._reader_thread = threading.Thread(target=self._stdout_reader, daemon=True)
+            self._reader_thread.start()
+        except Exception as e:
+            logging.error(f"Failed to start companion_tv: {e}")
+            self.is_running = False
+
+    def send_command(self, cmd: dict):
+        self.ensure_running()
+        if self.proc and self.proc.stdin:
+            try:
+                self.proc.stdin.write(json.dumps(cmd) + "\n")
+                self.proc.stdin.flush()
+            except Exception as e:
+                logging.debug(f"Companion IPC send failed: {e}")
+
+    def play(self, url: str, title: str = "", artist: str = ""):
+        self.is_paused = False
+        self.send_command({"action": "play", "url": url, "title": title, "artist": artist})
+
+    def toggle_pause(self):
+        self.is_paused = not self.is_paused
+        self.send_command({"action": "toggle_pause"})
+
+    def toggle_fullscreen(self):
+        self.send_command({"action": "toggle_fullscreen"})
+
+    def stop(self):
+        self.send_command({"action": "stop"})
+        self.is_paused = False
+
+    def close(self):
+        if self.proc:
+            try:
+                self.send_command({"action": "quit"})
+                self.proc.wait(timeout=0.6)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
+        self.is_running = False
+
+    def _stdout_reader(self):
+        while self.proc and self.proc.poll() is None:
+            try:
+                line = self.proc.stdout.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                if self.callback_event:
+                    self.callback_event(data)
+            except Exception:
+                break
+        self.is_running = False
+
+# =============================================================================
 # MAIN DASHBOARD APPLICATION
 # =============================================================================
 class SNfetchDashboard:
@@ -1243,8 +1327,9 @@ class SNfetchDashboard:
         self.tv_osd_visible = True
         self.tv_osd_last_interaction = 0.0
         self.direct_video_player: Optional[DirectVideoPlayer] = None
+        self.tv_companion: Optional[CompanionTVClient] = None
         if self.platform.is_pc:
-            self.direct_video_player = DirectVideoPlayer(target_w=620, target_h=460)
+            self.tv_companion = CompanionTVClient(callback_event=self._on_companion_event)
 
         self.settings_cursor = 0
         self.settings_column = 0  # 0 = Left Settings, 1 = Right Handbook
@@ -2384,9 +2469,32 @@ class SNfetchDashboard:
                         except Exception:
                             pass
 
+    def _on_companion_event(self, data: dict):
+        event = data.get("event")
+        if event == "eof":
+            if self.state == STATE_TV and not self.shuffle_mgr.is_repeat_mode:
+                self.station_mgr.increment_counter()
+                next_idx = self.shuffle_mgr.advance_next()
+                self.trigger_play_tv_track_async(next_idx)
+            elif self.state == STATE_TV and self.shuffle_mgr.is_repeat_mode:
+                self.trigger_play_tv_track_async(self.current_idx)
+        elif event == "request_next":
+            self.station_mgr.increment_counter()
+            next_idx = self.shuffle_mgr.advance_next()
+            self.trigger_play_tv_track_async(next_idx)
+        elif event == "request_prev":
+            self.current_idx = self.shuffle_mgr.step_prev()
+            self.trigger_play_tv_track_async(self.current_idx)
+        elif event in ("paused", "resumed"):
+            self.is_tv_playing = (event == "resumed")
+        elif event == "return_to_deck":
+            self.is_tv_fullscreen = False
+
     def stop_tv_video(self):
         with self._audio_lock:
             self._resolve_id += 1
+            if self.tv_companion:
+                self.tv_companion.stop()
             if self.direct_video_player:
                 self.direct_video_player.stop()
             self.is_tv_playing = False
@@ -2687,7 +2795,11 @@ class SNfetchDashboard:
                 self.current_idx = idx
                 self.cursor_idx = idx
                 self._update_quote()
-                if self.direct_video_player:
+                title = track.get("title", "Unknown Title")
+                artist = track.get("artist", "The Queen's Frequency")
+                if self.tv_companion:
+                    self.tv_companion.play(stream_url, title, artist)
+                elif self.direct_video_player:
                     self.direct_video_player.play(stream_url)
                 self.is_tv_playing = True
                 self._trigger_prefetch_next_track(idx, is_tv=True)
@@ -4508,23 +4620,35 @@ class SNfetchDashboard:
         vm_rect = pygame.Rect(vm_x, vm_y, vid_w, vid_h)
         pygame.draw.rect(self.screen, (20, 24, 32), (vm_x - 2, vm_y - 2, vid_w + 4, vid_h + 4), border_radius=10)
 
-        # Draw Live Video Frame or Fallback/Thumbnail
-        frame_surf = self.direct_video_player.get_surface() if (self.direct_video_player and self.is_tv_playing) else None
-        if frame_surf:
-            self.screen.blit(frame_surf, (vm_x, vm_y))
-        else:
-            thumb_surf = self.thumb_mgr.get_thumbnail(yt_id, title, size=(vid_w, vid_h))
-            self.screen.blit(thumb_surf, (vm_x, vm_y))
-            scrim = pygame.Surface((vid_w, vid_h), pygame.SRCALPHA)
-            scrim.fill((0, 0, 0, 95))
-            self.screen.blit(scrim, (vm_x, vm_y))
+        # Draw Live Video Frame or Fallback/Thumbnail / Companion Screen
+        thumb_surf = self.thumb_mgr.get_thumbnail(yt_id, title, size=(vid_w, vid_h))
+        self.screen.blit(thumb_surf, (vm_x, vm_y))
+        scrim = pygame.Surface((vid_w, vid_h), pygame.SRCALPHA)
+        scrim.fill((0, 0, 0, 125))
+        self.screen.blit(scrim, (vm_x, vm_y))
 
-            # Centered status
-            if self.is_resolving:
-                txt_s = self._render_cached_text("TUNING SATELLITE FEED...", 22, bold=True, color=NORD8)
-            else:
-                txt_s = self._render_cached_text("PRESS PLAY OR [0] FOR FULLSCREEN", 18, bold=True, color=NORD6)
-            self.screen.blit(txt_s, (vm_x + (vid_w - txt_s.get_width()) // 2, vm_y + vid_h // 2 - 10))
+        # Status badge
+        is_active = self.is_tv_playing and (not self.tv_companion or not self.tv_companion.is_paused)
+        stat_col = NORD14 if is_active else (NORD13 if self.is_resolving else NORD9)
+        stat_str = "● BROADCAST FEED ACTIVE (60 FPS GPU)" if is_active else ("TUNING SATELLITE FEED..." if self.is_resolving else "SATELLITE STANDBY")
+        b_tag = self._render_cached_text(stat_str, 18, bold=True, color=stat_col)
+        self.screen.blit(b_tag, (vm_x + 24, vm_y + 24))
+
+        # English Handheld & Demo Architecture Specification
+        line1 = self._render_cached_text("STATION NORTH • PC SUITE EMULATION", 20, bold=True, color=NORD6)
+        line2 = self._render_cached_text("Companion Video Engine: PyQt6 + libmpv OpenGL Pipeline", 14, bold=True, color=NORD8)
+        line3 = self._render_cached_text("Target Hardware: dArkOS / RK3326 Handheld (Mali-G31 DRM)", 13, bold=False, color=NORD4)
+        line4 = self._render_cached_text("On Handhelds, video renders zero-latency direct to KMS/DRM framebuffer.", 12, bold=False, color=NORD4)
+        line5 = self._render_cached_text("On PC, broadcast is projected into the dedicated GPU companion window.", 12, bold=False, color=NORD4)
+        self.screen.blit(line1, (vm_x + 24, vm_y + 140))
+        self.screen.blit(line2, (vm_x + 24, vm_y + 172))
+        self.screen.blit(line3, (vm_x + 24, vm_y + 200))
+        self.screen.blit(line4, (vm_x + 24, vm_y + 226))
+        self.screen.blit(line5, (vm_x + 24, vm_y + 246))
+
+        # Bottom Hint
+        hint_s = self._render_cached_text("[0] / CLICK: FULLSCREEN VIDEO • [ESC] DECK", 13, bold=True, color=NORD13)
+        self.screen.blit(hint_s, (vm_x + (vid_w - hint_s.get_width()) // 2, vm_y + vid_h - 32))
 
         # Inner CRT Border
         pygame.draw.rect(self.screen, NORD3, vm_rect, width=2, border_radius=8)
@@ -4661,9 +4785,12 @@ class SNfetchDashboard:
                 self.radio_osd_last_interaction = time.time()
             elif self.state == STATE_TV:
                 if self.platform.is_pc:
-                    self.is_tv_fullscreen = not self.is_tv_fullscreen
-                    self.tv_osd_visible = True
-                    self.tv_osd_last_interaction = time.time()
+                    if self.tv_companion:
+                        self.tv_companion.toggle_fullscreen()
+                    else:
+                        self.is_tv_fullscreen = not self.is_tv_fullscreen
+                        self.tv_osd_visible = True
+                        self.tv_osd_last_interaction = time.time()
                 else:
                     self.launch_video_playback(self.current_idx, manual_trigger=True)
 
@@ -4687,7 +4814,10 @@ class SNfetchDashboard:
                     self.trigger_play_track_async(self.current_idx)
             elif self.state == STATE_TV:
                 if self.platform.is_pc:
-                    if self.direct_video_player and self.direct_video_player.running:
+                    if self.tv_companion and self.tv_companion.is_running:
+                        self.tv_companion.toggle_pause()
+                        self.is_tv_playing = not self.tv_companion.is_paused
+                    elif self.direct_video_player and self.direct_video_player.running:
                         self.direct_video_player.toggle_pause()
                         self.is_tv_playing = not self.direct_video_player.is_paused
                     else:
@@ -5710,6 +5840,9 @@ class SNfetchDashboard:
                 if hasattr(self, "_stop_adc_listener") and self._stop_adc_listener:
                     self._stop_adc_listener.set()
                 self.stop_audio()
+                self.stop_tv_video()
+                if hasattr(self, "tv_companion") and self.tv_companion:
+                    self.tv_companion.close()
                 self.stop_chronicles_audio()
                 pygame.quit()
                 sys.exit(0)
@@ -5820,6 +5953,8 @@ class SNfetchDashboard:
             self._stop_adc_listener.set()
         self.stop_audio()
         self.stop_tv_video()
+        if hasattr(self, "tv_companion") and self.tv_companion:
+            self.tv_companion.close()
         self.stop_chronicles_audio()
         pygame.quit()
         sys.exit(0)
