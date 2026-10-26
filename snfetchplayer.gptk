@@ -29,3 +29,8 @@ l1 = left
 r1 = right
 l2 = esc
 r2 = enter
+
+# Hardware Side Volume Slider / Rocker
+volumeup = volumeup
+volumedown = volumedown
+

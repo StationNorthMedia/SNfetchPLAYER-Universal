@@ -261,23 +261,70 @@ class HardwareManager:
 
     @staticmethod
     def get_master_volume() -> int:
-        try:
-            res = subprocess.run(["amixer", "sget", "Playback"], capture_output=True, text=True, timeout=1)
-            for line in res.stdout.splitlines():
-                if "[" in line and "%]" in line:
-                    part = line.split("[")[1].split("%]")[0]
-                    return int(part)
-        except Exception:
-            pass
+        env = dict(os.environ)
+        if "XDG_RUNTIME_DIR" not in env or not os.path.exists(env.get("XDG_RUNTIME_DIR", "")):
+            for cand in ["/var/run/0-runtime-dir", "/run/0-runtime-dir", "/run/user/0"]:
+                if os.path.exists(cand):
+                    env["XDG_RUNTIME_DIR"] = cand
+                    break
+        if shutil.which("pactl"):
+            try:
+                res = subprocess.run(["pactl", "get-sink-volume", "@DEFAULT_SINK@"], capture_output=True, text=True, timeout=0.6, env=env)
+                for part in res.stdout.split():
+                    if part.endswith("%") and part[:-1].isdigit():
+                        return max(0, min(100, int(part[:-1])))
+            except Exception:
+                pass
+
+        if shutil.which("amixer"):
+            try:
+                res = subprocess.run(["amixer", "sget", "Playback"], capture_output=True, text=True, timeout=0.6)
+                for line in res.stdout.splitlines():
+                    if "[" in line and "%]" in line:
+                        part = line.split("[")[1].split("%]")[0]
+                        if part.isdigit():
+                            return int(part)
+            except Exception:
+                pass
         return 80
 
     @staticmethod
-    def set_master_volume(pct: int):
+    def adjust_volume(delta: int) -> int:
+        curr = HardwareManager.get_master_volume()
+        new_v = max(0, min(100, curr + delta))
+        HardwareManager.set_master_volume(new_v, delta=delta)
+        return new_v
+
+    @staticmethod
+    def set_master_volume(pct: int, delta: Optional[int] = None):
         pct = max(0, min(100, pct))
-        try:
-            subprocess.run(["amixer", "sset", "Playback", f"{pct}%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
+        # 1. ROCKNIX hardware volume CLI
+        if delta is not None and shutil.which("volume"):
+            try:
+                subprocess.run(["volume", "up" if delta > 0 else "down"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.4)
+            except Exception:
+                pass
+
+        # 2. PipeWire / PulseAudio via pactl
+        env = dict(os.environ)
+        if "XDG_RUNTIME_DIR" not in env or not os.path.exists(env.get("XDG_RUNTIME_DIR", "")):
+            for cand in ["/var/run/0-runtime-dir", "/run/0-runtime-dir", "/run/user/0"]:
+                if os.path.exists(cand):
+                    env["XDG_RUNTIME_DIR"] = cand
+                    break
+        if shutil.which("pactl"):
+            try:
+                subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.4, env=env)
+            except Exception:
+                pass
+
+        # 3. ALSA amixer fallback
+        if shutil.which("amixer"):
+            try:
+                subprocess.run(["amixer", "sset", "Playback", f"{pct}%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.4)
+                subprocess.run(["amixer", "sset", "Master", f"{pct}%"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.4)
+            except Exception:
+                pass
 
     @staticmethod
     def get_brightness() -> int:
@@ -323,23 +370,19 @@ class IntegratedVisualizer:
         self.last_audio_feed = 0.0
         self.peak_energy = 15000.0  # Adaptiver Dynamik-Baseline-Wert (AGC)
 
-        # Precomputations for zero-dependency Cooley-Tukey Radix-2 FFT (parity when numpy is absent)
+        # Fast Precomputations for NumPy FFT (< 0.1ms compute time)
+        if np is not None:
+            self._np_win_512 = np.hanning(512).astype(np.float32)
+            self._np_win_256 = np.hanning(256).astype(np.float32)
+            self._np_idx_512 = np.logspace(0, np.log10(255), self.num_bars + 1).astype(int)
+            self._np_idx_512[0] = 1
+            self._np_idx_256 = np.logspace(0, np.log10(127), self.num_bars + 1).astype(int)
+            self._np_idx_256[0] = 1
+            self._np_tilts = [1.0 + (i / float(self.num_bars)) * 3.5 for i in range(self.num_bars)]
+
+        # Zero-dependency fallback
         self._fft_n = 256
-        self._rev = [0] * self._fft_n
-        for i in range(self._fft_n):
-            r = 0
-            for b in range(8):
-                if (i >> b) & 1:
-                    r |= (1 << (7 - b))
-            self._rev[i] = r
-
-        self._twiddle_cos = [math.cos(-2.0 * math.pi * k / self._fft_n) for k in range(self._fft_n // 2)]
-        self._twiddle_sin = [math.sin(-2.0 * math.pi * k / self._fft_n) for k in range(self._fft_n // 2)]
         self._hann = [0.5 * (1.0 - math.cos(2.0 * math.pi * n / (self._fft_n - 1))) for n in range(self._fft_n)]
-
-        # Precompute 40 log band indices across 128 bins (bins 1..127, skipping DC)
-        self._log_indices = [int(round(math.pow(127, i / self.num_bars))) for i in range(self.num_bars + 1)]
-        self._log_indices[0] = 1
 
     def feed_pcm(self, pcm_bytes: bytes):
         """Processes raw 16-bit PCM mono 22050Hz chunk and computes balanced 40-band spectrum"""
@@ -348,81 +391,66 @@ class IntegratedVisualizer:
 
         if np is not None:
             try:
-                samples = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32)
-                n = len(samples)
-                window = np.hanning(n)
-                fft_vals = np.abs(np.fft.rfft(samples * window))
-                num_bins = len(fft_vals)
-                if num_bins >= self.num_bars:
-                    indices = np.logspace(0, np.log10(num_bins - 1), self.num_bars + 1).astype(int)
-                    raw_bands = []
-                    for i in range(self.num_bars):
-                        start = indices[i]
-                        end = max(start + 1, indices[i+1])
-                        tilt = 1.0 + (i / float(self.num_bars)) * 3.5
-                        raw_val = float(np.mean(fft_vals[start:end])) * tilt
-                        raw_bands.append(raw_val)
-
-                    max_in_frame = max(raw_bands) if raw_bands else 1.0
-                    if max_in_frame > self.peak_energy:
-                        self.peak_energy = self.peak_energy * 0.75 + max_in_frame * 0.25
-                    else:
-                        self.peak_energy = max(2000.0, self.peak_energy * 0.965 + max_in_frame * 0.035)
-
-                    bands = []
-                    for raw_val in raw_bands:
-                        ratio = min(1.0, max(0.0, raw_val / max(1.0, self.peak_energy)))
-                        curve = ratio ** 0.6
-                        h = 14.0 + 185.0 * curve
-                        bands.append(h)
-
-                    self.target_heights = bands
-                    self.has_real_audio = True
-                    self.last_audio_feed = time.time()
+                sample_count = len(pcm_bytes) // 2
+                if sample_count >= 512:
+                    samples = np.frombuffer(pcm_bytes[-1024:], dtype=np.int16).astype(np.float32)
+                    fft_vals = np.abs(np.fft.rfft(samples * self._np_win_512))
+                    indices = self._np_idx_512
+                elif sample_count >= 256:
+                    samples = np.frombuffer(pcm_bytes[-512:], dtype=np.int16).astype(np.float32)
+                    fft_vals = np.abs(np.fft.rfft(samples * self._np_win_256))
+                    indices = self._np_idx_256
+                else:
                     return
+
+                raw_bands = []
+                for i in range(self.num_bars):
+                    s = indices[i]
+                    e = max(s + 1, indices[i+1])
+                    raw_val = float(np.mean(fft_vals[s:e])) * self._np_tilts[i]
+                    raw_bands.append(raw_val)
+
+                max_in_frame = max(raw_bands) if raw_bands else 1.0
+                if max_in_frame > self.peak_energy:
+                    self.peak_energy = self.peak_energy * 0.75 + max_in_frame * 0.25
+                else:
+                    self.peak_energy = max(2000.0, self.peak_energy * 0.965 + max_in_frame * 0.035)
+
+                bands = []
+                for raw_val in raw_bands:
+                    ratio = min(1.0, max(0.0, raw_val / max(1.0, self.peak_energy)))
+                    curve = ratio ** 0.6
+                    h = 14.0 + 185.0 * curve
+                    bands.append(h)
+
+                self.target_heights = bands
+                self.has_real_audio = True
+                self.last_audio_feed = time.time()
+                return
             except Exception:
                 pass
 
-        # Zero-dependency Fast Cooley-Tukey Radix-2 FFT (exact mathematical parity with np.fft.rfft)
+        # Zero-dependency Lightweight Fallback (< 0.2ms)
         try:
-            n = self._fft_n
             sample_count = len(pcm_bytes) // 2
-            if sample_count < n:
+            samples = struct.unpack(f"<{sample_count}h", pcm_bytes[-sample_count * 2:])
+            if not samples:
                 return
-            raw = struct.unpack(f"<{n}h", pcm_bytes[-n*2:])
+            total_abs = sum(abs(s) for s in samples)
+            avg_amp = total_abs / float(sample_count)
+            if avg_amp < 10.0:
+                return
 
-            # Apply Hann window & bit reversal permutation
-            re = [raw[self._rev[i]] * self._hann[self._rev[i]] for i in range(n)]
-            im = [0.0] * n
-
-            length = 2
-            while length <= n:
-                half = length // 2
-                step = n // length
-                for i in range(0, n, length):
-                    for k in range(half):
-                        t_idx = k * step
-                        c = self._twiddle_cos[t_idx]
-                        s = self._twiddle_sin[t_idx]
-                        tr = re[i + k + half] * c - im[i + k + half] * s
-                        ti = re[i + k + half] * s + im[i + k + half] * c
-                        re[i + k + half] = re[i + k] - tr
-                        im[i + k + half] = im[i + k] - ti
-                        re[i + k] += tr
-                        im[i + k] += ti
-                length *= 2
-
-            # Magnitudes of first n//2 positive frequency bins
-            mags = [math.sqrt(re[k]*re[k] + im[k]*im[k]) for k in range(n // 2)]
-
+            step = max(1, sample_count // self.num_bars)
             raw_bands = []
             for i in range(self.num_bars):
-                start = self._log_indices[i]
-                end = max(start + 1, self._log_indices[i+1])
-                tilt = 1.0 + (i / float(self.num_bars)) * 3.5
-                raw_val = (sum(mags[start:end]) / float(end - start)) * tilt
-                raw_bands.append(raw_val)
-
+                chunk = samples[i * step : (i + 1) * step]
+                if chunk:
+                    chunk_amp = sum(abs(s) for s in chunk) / float(len(chunk))
+                    tilt = 1.0 + (i / float(self.num_bars)) * 2.8
+                    raw_bands.append(chunk_amp * tilt)
+                else:
+                    raw_bands.append(avg_amp)
             max_in_frame = max(raw_bands) if raw_bands else 1.0
             if max_in_frame > self.peak_energy:
                 self.peak_energy = self.peak_energy * 0.75 + max_in_frame * 0.25
@@ -822,6 +850,10 @@ class SNfetchDashboard:
         self._cached_label_logo: Optional[pygame.Surface] = None
 
         self.splash_enter_time = time.time()
+        # Global Volume OSD Feedback
+        self.volume_osd_visible: bool = False
+        self.volume_osd_time: float = 0.0
+        self.volume_osd_val: int = 80
 
         # Load default Radio Playlist
         self._load_active_playlist(is_tv=False)
@@ -1817,7 +1849,7 @@ class SNfetchDashboard:
     def _audio_spectrum_reader(self, proc: subprocess.Popen, is_tap: bool = False):
         if not proc or not proc.stdout:
             return
-        chunk_size = 512 if is_tap else 1024  # 256 samples (~11.6ms) for tap, 512 samples (~23ms) for pipe
+        chunk_size = 1024  # 512 samples (~23.2ms) for optimal 43 FPS visualizer cadence
         chunk_duration = (chunk_size // 2) / 22050.0
         
         # Audio DAC hardware / ring buffer delay compensation only when reading ahead from ffmpeg
@@ -3894,6 +3926,55 @@ class SNfetchDashboard:
         self.screen.blit(ver_surf, (SCREEN_WIDTH - 24 - ver_surf.get_width(), by + (48 - ver_surf.get_height()) // 2))
 
     # =========================================================================
+    # GLOBAL HARDWARE VOLUME OSD HUD
+    # =========================================================================
+    def _trigger_volume_change(self, delta: int):
+        new_v = self.hardware.adjust_volume(delta)
+        self.volume_osd_visible = True
+        self.volume_osd_time = time.time()
+        self.volume_osd_val = new_v
+
+    def draw_volume_osd(self):
+        if not self.volume_osd_visible:
+            return
+        elapsed = time.time() - self.volume_osd_time
+        if elapsed > 1.8:
+            self.volume_osd_visible = False
+            return
+
+        alpha = 240
+        if elapsed > 1.4:
+            alpha = int(240 * ((1.8 - elapsed) / 0.4))
+            if alpha <= 0:
+                self.volume_osd_visible = False
+                return
+
+        hud_w, hud_h = 320, 52
+        hud_x = (SCREEN_WIDTH - hud_w) // 2
+        hud_y = 24
+
+        overlay = pygame.Surface((hud_w, hud_h), pygame.SRCALPHA)
+        pygame.draw.rect(overlay, (*NORD1, alpha), (0, 0, hud_w, hud_h), border_radius=18)
+        border_alpha = min(255, int(alpha * 0.9))
+        pygame.draw.rect(overlay, (*NORD8, border_alpha), (0, 0, hud_w, hud_h), width=2, border_radius=18)
+
+        vol_font = self._load_font(18, bold=True)
+        txt_s = vol_font.render(f"Volume: {self.volume_osd_val}%", True, NORD6)
+        overlay.blit(txt_s, (20, (hud_h - txt_s.get_height()) // 2))
+
+        bar_x = 160
+        bar_y = (hud_h - 12) // 2
+        bar_w = 140
+        bar_h = 12
+        pygame.draw.rect(overlay, (*NORD3, alpha), (bar_x, bar_y, bar_w, bar_h), border_radius=6)
+        fill_w = int(bar_w * (max(0, min(100, self.volume_osd_val)) / 100.0))
+        if fill_w > 0:
+            fill_col = NORD14 if self.volume_osd_val < 85 else NORD13
+            pygame.draw.rect(overlay, (*fill_col, alpha), (bar_x, bar_y, fill_w, bar_h), border_radius=6)
+
+        self.screen.blit(overlay, (hud_x, hud_y))
+
+    # =========================================================================
     # UNIFIED INPUT DISPATCHER (KEYBOARD & GAMEPAD)
     # =========================================================================
     def _handle_action_key(self, key: int) -> bool:
@@ -3908,6 +3989,25 @@ class SNfetchDashboard:
         if now - self._state_transition_time < 0.25:
             if key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_KP_ENTER, pygame.K_a, pygame.K_ESCAPE, pygame.K_b, pygame.K_q, pygame.K_BACKSPACE, pygame.K_TAB, pygame.K_s):
                 return True
+
+        # Global Hardware Volume Keys (Side slider / rocker / + - keys)
+        vol_up_keys = (
+            getattr(pygame, "K_VOLUMEUP", 1073741952),
+            pygame.K_PLUS,
+            pygame.K_EQUALS,
+            pygame.K_KP_PLUS,
+        )
+        vol_down_keys = (
+            getattr(pygame, "K_VOLUMEDOWN", 1073741953),
+            pygame.K_MINUS,
+            pygame.K_KP_MINUS,
+        )
+        if key in vol_up_keys:
+            self._trigger_volume_change(+5)
+            return True
+        elif key in vol_down_keys:
+            self._trigger_volume_change(-5)
+            return True
 
         # Global Settings Toggle [Select] (Tab / S)
         if key in (pygame.K_TAB, pygame.K_s):
@@ -4206,6 +4306,9 @@ class SNfetchDashboard:
                 self.draw_chronicles_screen()
             elif self.state == STATE_SETTINGS:
                 self.draw_settings_screen()
+
+            if self.volume_osd_visible:
+                self.draw_volume_osd()
 
             pygame.display.flip()
 
