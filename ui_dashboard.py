@@ -22,6 +22,12 @@ Unified Controls (Front Buttons Only):
 
 import sys
 import os
+import locale
+try:
+    locale.setlocale(locale.LC_NUMERIC, "C")
+except Exception:
+    pass
+import collections
 import json
 import time
 import socket
@@ -928,17 +934,22 @@ class LinuxGamepadReader:
 # =============================================================================
 class DirectVideoPlayer:
     """Streams decoded video frames directly into Pygame surfaces with synchronized audio.
-    Prevents external windows from spawning on Wayland/KDE/X11 and guarantees 100% single-window playback."""
+    Prevents external windows from spawning on Wayland/KDE/X11 and guarantees 100% single-window playback.
+    Uses bounded FIFO queue and accumulator pacing to ensure smooth 24-30 FPS playback matching the audio clock."""
     def __init__(self, target_w: int = 620, target_h: int = 460):
         self.target_w = target_w
         self.target_h = target_h
         self.frame_bytes = target_w * target_h * 3
         self.proc: Optional[subprocess.Popen] = None
         self.current_surface: Optional[pygame.Surface] = None
+        self.frame_queue = collections.deque(maxlen=60)
         self.lock = threading.Lock()
         self.running = False
         self.is_paused = False
         self.is_finished = False
+        self.fps = 24.0
+        self.frame_interval = 1.0 / 24.0
+        self.next_pop_time = 0.0
         self._reader_thread: Optional[threading.Thread] = None
 
     def play(self, stream_url: str):
@@ -946,35 +957,61 @@ class DirectVideoPlayer:
         self.running = True
         self.is_finished = False
         self.is_paused = False
+        with self.lock:
+            self.frame_queue.clear()
+            self.next_pop_time = 0.0
+            self.current_surface = None
 
-        # Fast probe for audio stream to prevent ffmpeg null mapping errors
-        has_audio = False
+        # Fast probe stream for audio presence & video framerate
+        has_audio = True
+        detected_fps = 24.0
         try:
             prb = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", stream_url],
+                ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,r_frame_rate", "-of", "csv=p=0", stream_url],
                 capture_output=True, text=True, timeout=1.5
             )
-            has_audio = bool(prb.stdout.strip())
+            out_lines = prb.stdout.strip().splitlines()
+            has_audio = any("audio" in line for line in out_lines)
+            for line in out_lines:
+                if "video" in line and "," in line:
+                    parts = line.split(",")
+                    if len(parts) >= 2 and "/" in parts[1]:
+                        num, den = parts[1].split("/")
+                        if float(den) > 0:
+                            calc_fps = float(num) / float(den)
+                            if 10.0 <= calc_fps <= 65.0:
+                                detected_fps = calc_fps
         except Exception:
-            has_audio = False
+            has_audio = True
+            detected_fps = 24.0
+
+        self.fps = detected_fps
+        self.frame_interval = 1.0 / max(1.0, self.fps)
 
         vf = f"scale={self.target_w}:{self.target_h}:force_original_aspect_ratio=decrease,pad={self.target_w}:{self.target_h}:(ow-iw)/2:(oh-ih)/2,format=rgb24"
+        reconnect_args = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"] if str(stream_url).startswith("http") else []
         cmd = [
             "ffmpeg",
-            "-re",
+            *reconnect_args,
+        ]
+        # Realtime input throttling only when audio is absent; PulseAudio hardware DMA clocks the stream when audio is present.
+        if not has_audio:
+            cmd.append("-re")
+
+        cmd.extend([
             "-i", stream_url,
             "-filter_complex", f"[0:v]{vf}[v]",
             "-map", "[v]",
             "-f", "rawvideo",
             "pipe:1",
             "-loglevel", "quiet"
-        ]
+        ])
         if has_audio:
             # Route audio to system default sink (PulseAudio / PipeWire / ALSA)
             cmd.extend(["-map", "0:a", "-f", "pulse", "default"])
 
         try:
-            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=self.frame_bytes * 2)
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=self.frame_bytes * 4)
             self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._reader_thread.start()
         except Exception as e:
@@ -984,23 +1021,46 @@ class DirectVideoPlayer:
 
     def _read_loop(self):
         while self.running and self.proc and self.proc.poll() is None:
-            if self.is_paused:
-                time.sleep(0.04)
-                continue
             try:
                 raw = self.proc.stdout.read(self.frame_bytes)
                 if not raw or len(raw) < self.frame_bytes:
                     break
                 surf = pygame.image.frombuffer(raw, (self.target_w, self.target_h), "RGB")
                 with self.lock:
-                    self.current_surface = surf
+                    self.frame_queue.append(surf)
             except Exception:
                 break
         self.is_finished = True
         self.running = False
 
     def get_surface(self) -> Optional[pygame.Surface]:
+        if self.is_paused:
+            with self.lock:
+                return self.current_surface
+
+        now = time.time()
         with self.lock:
+            if not self.frame_queue:
+                return self.current_surface
+
+            # First frame initialization
+            if self.next_pop_time == 0.0:
+                self.current_surface = self.frame_queue.popleft()
+                self.next_pop_time = now + self.frame_interval
+                return self.current_surface
+
+            # Dynamic drift correction:
+            # If buffer is getting too full (> 40 frames ≈ 1.6s lag), drop older frames to maintain A/V sync
+            if len(self.frame_queue) > 40:
+                while len(self.frame_queue) > 20:
+                    self.frame_queue.popleft()
+
+            if now >= self.next_pop_time:
+                self.current_surface = self.frame_queue.popleft()
+                self.next_pop_time += self.frame_interval
+                if self.next_pop_time < now - 0.1:
+                    self.next_pop_time = now
+
             return self.current_surface
 
     def toggle_pause(self):
@@ -1011,6 +1071,9 @@ class DirectVideoPlayer:
             import signal
             sig = signal.SIGSTOP if self.is_paused else signal.SIGCONT
             os.kill(self.proc.pid, sig)
+            if not self.is_paused:
+                with self.lock:
+                    self.next_pop_time = time.time() + self.frame_interval
         except Exception:
             pass
 
@@ -1030,7 +1093,11 @@ class DirectVideoPlayer:
                     pass
             self.proc = None
         with self.lock:
+            self.frame_queue.clear()
             self.current_surface = None
+            self.next_pop_time = 0.0
+        self.is_finished = False
+        self.is_paused = False
 
 # =============================================================================
 # MAIN DASHBOARD APPLICATION
