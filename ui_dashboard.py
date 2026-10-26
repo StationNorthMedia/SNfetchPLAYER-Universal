@@ -281,8 +281,18 @@ class ShuffleQueueManager:
 # SYSTEM TELEMETRY & HARDWARE MANAGER
 # =============================================================================
 class HardwareManager:
-    @staticmethod
-    def get_battery_info() -> Tuple[int, bool]:
+    _cached_battery: Optional[Tuple[int, bool]] = None
+    _battery_cache_time: float = 0.0
+    _cached_wifi: Optional[bool] = None
+    _wifi_cache_time: float = 0.0
+
+    @classmethod
+    def get_battery_info(cls) -> Tuple[int, bool]:
+        now = time.time()
+        if cls._cached_battery is not None and (now - cls._battery_cache_time) < 2.5:
+            return cls._cached_battery
+
+        res = (100, True)
         ps_dir = Path("/sys/class/power_supply")
         if ps_dir.exists():
             candidates = list(ps_dir.glob("*"))
@@ -307,22 +317,31 @@ class HardwareManager:
                         if stat_file.exists():
                             st = stat_file.read_text().strip().lower()
                             is_chg = "charging" in st or "full" in st
-                        return max(0, min(100, cap)), is_chg
+                        res = (max(0, min(100, cap)), is_chg)
+                        break
                     except Exception:
                         pass
+            else:
+                # If no battery found, check if mains AC power is online (desktop PC)
+                for m in ps_dir.glob("*"):
+                    type_f = m / "type"
+                    online_f = m / "online"
+                    if type_f.exists() and "mains" in type_f.read_text().strip().lower():
+                        if online_f.exists() and online_f.read_text().strip() == "1":
+                            res = (100, True)
+                            break
 
-            # If no battery found, check if mains AC power is online (desktop PC)
-            for m in ps_dir.glob("*"):
-                type_f = m / "type"
-                online_f = m / "online"
-                if type_f.exists() and "mains" in type_f.read_text().strip().lower():
-                    if online_f.exists() and online_f.read_text().strip() == "1":
-                        return 100, True
+        cls._cached_battery = res
+        cls._battery_cache_time = now
+        return res
 
-        return 100, True
+    @classmethod
+    def get_wifi_status(cls) -> bool:
+        now = time.time()
+        if cls._cached_wifi is not None and (now - cls._wifi_cache_time) < 3.0:
+            return cls._cached_wifi
 
-    @staticmethod
-    def get_wifi_status() -> bool:
+        res = False
         net_dir = Path("/sys/class/net")
         if net_dir.exists():
             for iface in net_dir.glob("*"):
@@ -333,16 +352,20 @@ class HardwareManager:
                     if op.exists():
                         try:
                             if "up" in op.read_text().strip().lower():
-                                return True
+                                res = True
+                                break
                         except Exception:
                             pass
                     if carrier.exists():
                         try:
                             if carrier.read_text().strip() == "1":
-                                return True
+                                res = True
+                                break
                         except Exception:
                             pass
-        return False
+        cls._cached_wifi = res
+        cls._wifi_cache_time = now
+        return res
 
     @staticmethod
     def get_time_str() -> str:
@@ -926,6 +949,20 @@ class SNfetchDashboard:
         self.shuffle_mgr = ShuffleQueueManager()
         self.logo_img = self._load_logo()
         self.logo_large = self._load_large_logo()
+        self.logo_zen_wm = None
+        self.logo_tv_wm = None
+        if self.logo_large:
+            try:
+                orig_w, orig_h = self.logo_large.get_size()
+                wm_h = 60
+                wm_w = int(wm_h * (orig_w / orig_h))
+                self.logo_zen_wm = pygame.transform.smoothscale(self.logo_large, (wm_w, wm_h))
+                self.logo_zen_wm.set_alpha(180)
+
+                self.logo_tv_wm = pygame.transform.smoothscale(self.logo_large, (76, 76))
+                self.logo_tv_wm.set_alpha(165)
+            except Exception:
+                pass
 
         # Set Window and Taskbar Icon (Station North Logo instead of default pygame snake)
         if self.logo_large or self.logo_img:
@@ -1074,15 +1111,36 @@ class SNfetchDashboard:
     def audio_env(self) -> Dict[str, str]:
         return self.platform.get_audio_env()
 
+    _font_cache: Dict[Tuple[int, bool, bool], pygame.font.Font] = {}
+
     def _load_font(self, size: int, bold=False, italic=False) -> pygame.font.Font:
+        key = (size, bold, italic)
+        if key in self._font_cache:
+            return self._font_cache[key]
         try:
             for name in ["dejavusans", "freesans", "arial", "helvetica", "sans"]:
                 f = pygame.font.SysFont(name, size, bold=bold, italic=italic)
                 if f:
+                    self._font_cache[key] = f
                     return f
         except Exception:
             pass
-        return pygame.font.Font(None, size)
+        f = pygame.font.Font(None, size)
+        self._font_cache[key] = f
+        return f
+
+    _text_surface_cache: Dict[Tuple[str, int, bool, Tuple[int, int, int]], pygame.Surface] = {}
+
+    def _render_cached_text(self, text: str, size: int, bold: bool = True, color: Tuple[int, int, int] = NORD6) -> pygame.Surface:
+        key = (text, size, bold, color)
+        surf = self._text_surface_cache.get(key)
+        if surf is None:
+            font = self._load_font(size, bold=bold)
+            surf = font.render(text, True, color)
+            if len(self._text_surface_cache) > 256:
+                self._text_surface_cache.clear()
+            self._text_surface_cache[key] = surf
+        return surf
 
     def _load_logo(self) -> Optional[pygame.Surface]:
         paths = [APP_DIR / "sn_logo.png", Path("sn_logo.png")]
@@ -1392,7 +1450,14 @@ class SNfetchDashboard:
                 except Exception:
                     pass
 
+    _cached_asset_stats: Optional[Tuple[int, int, int, int, float]] = None
+    _asset_stats_cache_time: float = 0.0
+
     def get_asset_stats(self) -> Tuple[int, int, int, int, float]:
+        now = time.time()
+        if self._cached_asset_stats is not None and (now - self._asset_stats_cache_time) < 5.0:
+            return self._cached_asset_stats
+
         j_count = len(self.station_mgr.jingles)
         t_count = len(self.station_mgr.tv_ids)
         c_count = 0
@@ -1406,7 +1471,10 @@ class SNfetchDashboard:
         total = j_count + t_count + c_count
         expected = 174 + 42 + 131  # 347 total media assets (174 Jingles + 42 TV Idents + 131 Chronicles Pages & Audio)
         pct = min(100.0, (total / expected) * 100.0) if expected > 0 else 0.0
-        return j_count, t_count, c_count, total, pct
+        res = (j_count, t_count, c_count, total, pct)
+        self._cached_asset_stats = res
+        self._asset_stats_cache_time = now
+        return res
 
     def _start_background_asset_sync(self):
         """Starts background daemon thread to check and download missing media assets"""
@@ -2894,45 +2962,61 @@ class SNfetchDashboard:
 
                 # "1" inside badge if loop mode is active
                 if self.shuffle_mgr.is_repeat_mode:
-                    one_surf = self._load_font(14, bold=True).render("1", True, icon_col)
+                    one_surf = self._render_cached_text("1", 14, bold=True, color=icon_col)
                     surface.blit(one_surf, (cx - one_surf.get_width() // 2, cy - one_surf.get_height() // 2))
 
     # =========================================================================
     # VECTOR ICON HELPERS FOR SPLASH SCREEN & MAIN MENU (NORD SPECIFICATION)
     # =========================================================================
-    def _draw_vertical_gradient(self, surface: pygame.Surface, rect: pygame.Rect, col_top: Tuple[int, int, int], col_bottom: Tuple[int, int, int], border_radius: int = 0):
-        """Draws a high-precision vertical linear gradient with optional rounded corners"""
-        temp = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-        h = max(rect.height - 1, 1)
-        for y in range(rect.height):
-            factor = y / h
-            r = int(col_top[0] + factor * (col_bottom[0] - col_top[0]))
-            g = int(col_top[1] + factor * (col_bottom[1] - col_top[1]))
-            b = int(col_top[2] + factor * (col_bottom[2] - col_top[2]))
-            pygame.draw.line(temp, (r, g, b), (0, y), (rect.width, y))
+    _gradient_cache: Dict[Tuple, pygame.Surface] = {}
 
-        if border_radius > 0:
-            mask = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-            pygame.draw.rect(mask, (255, 255, 255, 255), (0, 0, rect.width, rect.height), border_radius=border_radius)
-            temp.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+    def _draw_vertical_gradient(self, surface: pygame.Surface, rect: pygame.Rect, col_top: Tuple[int, int, int], col_bottom: Tuple[int, int, int], border_radius: int = 0):
+        """Draws a high-precision vertical linear gradient with optional rounded corners (cached)"""
+        cache_key = ("v", rect.width, rect.height, col_top, col_bottom, border_radius)
+        temp = self._gradient_cache.get(cache_key)
+        if temp is None:
+            temp = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            h = max(rect.height - 1, 1)
+            for y in range(rect.height):
+                factor = y / h
+                r = int(col_top[0] + factor * (col_bottom[0] - col_top[0]))
+                g = int(col_top[1] + factor * (col_bottom[1] - col_top[1]))
+                b = int(col_top[2] + factor * (col_bottom[2] - col_top[2]))
+                pygame.draw.line(temp, (r, g, b), (0, y), (rect.width, y))
+
+            if border_radius > 0:
+                mask = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+                pygame.draw.rect(mask, (255, 255, 255, 255), (0, 0, rect.width, rect.height), border_radius=border_radius)
+                temp.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+
+            if len(self._gradient_cache) > 64:
+                self._gradient_cache.clear()
+            self._gradient_cache[cache_key] = temp
 
         surface.blit(temp, rect.topleft)
 
     def _draw_horizontal_gradient(self, surface: pygame.Surface, rect: pygame.Rect, col_left: Tuple[int, int, int], col_right: Tuple[int, int, int], border_radius: int = 0):
-        """Draws a high-precision horizontal linear gradient with optional rounded corners"""
-        temp = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-        w = max(rect.width - 1, 1)
-        for x in range(rect.width):
-            factor = x / w
-            r = int(col_left[0] + factor * (col_right[0] - col_left[0]))
-            g = int(col_left[1] + factor * (col_right[1] - col_left[1]))
-            b = int(col_left[2] + factor * (col_right[2] - col_left[2]))
-            pygame.draw.line(temp, (r, g, b), (x, 0), (x, rect.height))
+        """Draws a high-precision horizontal linear gradient with optional rounded corners (cached)"""
+        cache_key = ("h", rect.width, rect.height, col_left, col_right, border_radius)
+        temp = self._gradient_cache.get(cache_key)
+        if temp is None:
+            temp = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+            w = max(rect.width - 1, 1)
+            for x in range(rect.width):
+                factor = x / w
+                r = int(col_left[0] + factor * (col_right[0] - col_left[0]))
+                g = int(col_left[1] + factor * (col_right[1] - col_left[1]))
+                b = int(col_left[2] + factor * (col_right[2] - col_left[2]))
+                pygame.draw.line(temp, (r, g, b), (x, 0), (x, rect.height))
 
-        if border_radius > 0:
-            mask = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
-            pygame.draw.rect(mask, (255, 255, 255, 255), (0, 0, rect.width, rect.height), border_radius=border_radius)
-            temp.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+            if border_radius > 0:
+                mask = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
+                pygame.draw.rect(mask, (255, 255, 255, 255), (0, 0, rect.width, rect.height), border_radius=border_radius)
+                temp.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+
+            if len(self._gradient_cache) > 64:
+                self._gradient_cache.clear()
+            self._gradient_cache[cache_key] = temp
 
         surface.blit(temp, rect.topleft)
 
@@ -3284,7 +3368,7 @@ class SNfetchDashboard:
             div_y = box_y + 112
             pygame.draw.line(self.screen, (46, 52, 64), (box_x + 28, div_y), (box_x + box_w - 28, div_y), 1)
 
-            badge_surf = self._load_font(14, bold=True).render("✦ QUEEN DIRECTIVES // TRANSMISSION FEED ✦", True, NORD9)
+            badge_surf = self._render_cached_text("✦ QUEEN DIRECTIVES // TRANSMISSION FEED ✦", 14, bold=True, color=NORD9)
             self.screen.blit(badge_surf, (box_x + 28, box_y + 122))
 
             max_visible_lines = 4
@@ -3295,22 +3379,23 @@ class SNfetchDashboard:
             line_y = box_y + 148
             line_h = 26
             for line in visible_lines:
-                q_surf = q_font.render(line, True, self.current_quote_color)
+                q_surf = self._render_cached_text(line, 19, bold=True, color=self.current_quote_color)
                 self.screen.blit(q_surf, (box_x + 28, line_y))
                 line_y += line_h
         else:
             # Variant B: Pure Queen Directives Console aligned to the bottom of the box!
             # The upper area stays completely free of text to let the artwork shine.
-            badge_font = self._load_font(18, bold=True)
-            badge_surf = badge_font.render("✦ THE QUEEN'S DIRECTIVES // TRANSMISSION FEED ✦", True, NORD8)
+            badge_surf = self._render_cached_text("✦ THE QUEEN'S DIRECTIVES // TRANSMISSION FEED ✦", 18, bold=True, color=NORD8)
             badge_h = badge_surf.get_height()
 
             # Measure quote block (adaptive font size to guarantee 0 clipping)
             max_q_w = box_w - 56
-            q_font = self._load_font(21, bold=True)
+            q_size = 21
+            q_font = self._load_font(q_size, bold=True)
             quote_lines = self._render_wrapped_lines(f"“{self.current_quote}”", q_font, max_q_w)
             if len(quote_lines) >= 3:
-                q_font = self._load_font(18, bold=True)
+                q_size = 18
+                q_font = self._load_font(q_size, bold=True)
                 quote_lines = self._render_wrapped_lines(f"“{self.current_quote}”", q_font, max_q_w)
 
             max_visible_lines = 6
@@ -3329,7 +3414,7 @@ class SNfetchDashboard:
 
             line_y = quote_start_y
             for line in visible_lines:
-                q_surf = q_font.render(line, True, self.current_quote_color)
+                q_surf = self._render_cached_text(line, q_size, bold=True, color=self.current_quote_color)
                 self.screen.blit(q_surf, (box_x + 28, line_y))
                 line_y += line_h
 
@@ -3390,7 +3475,7 @@ class SNfetchDashboard:
             c["icon"](self.screen, rect.x + card_w // 2, rect.y + pad + art_size // 2, (255, 255, 255))
 
             # Text in bottom black banner
-            txt_surf = self._load_font(24, bold=True).render(c["title"], True, (255, 255, 255))
+            txt_surf = self._render_cached_text(c["title"], 24, bold=True, color=(255, 255, 255))
             text_y = rect.y + pad + art_size + (card_h - (pad + art_size) - txt_surf.get_height()) // 2
             self.screen.blit(txt_surf, (rect.x + (card_w - txt_surf.get_width()) // 2, text_y))
 
@@ -3444,17 +3529,12 @@ class SNfetchDashboard:
         self.visualizer.draw(self.screen, x=32, y=260, width=960, max_h=440)
 
         # 2. Station North Logo Watermark (top left, proportional un-distorted)
-        if self.logo_large:
-            orig_w, orig_h = self.logo_large.get_size()
-            wm_h = 60
-            wm_w = int(wm_h * (orig_w / orig_h))
-            wm = pygame.transform.smoothscale(self.logo_large, (wm_w, wm_h))
-            wm.set_alpha(180)
-            self.screen.blit(wm, (40, 36))
+        if self.logo_zen_wm:
+            self.screen.blit(self.logo_zen_wm, (40, 36))
 
         # Station Title / Clock (top right)
         clock_str = HardwareManager.get_time_str()
-        time_s = self._load_font(26, bold=True).render(clock_str, True, NORD4)
+        time_s = self._render_cached_text(clock_str, 26, bold=True, color=NORD4)
         self.screen.blit(time_s, (SCREEN_WIDTH - 44 - time_s.get_width(), 42))
 
         # 3. Track Info (Centered, Large & Floating)
@@ -3465,13 +3545,11 @@ class SNfetchDashboard:
             title = self.station_drop_title
 
         cx = SCREEN_WIDTH // 2
-        t_font = self._load_font(34, bold=True)
-        if len(title) > 30:
-            t_font = self._load_font(26, bold=True)
-        t_surf = t_font.render(title, True, NORD6)
+        title_size = 26 if len(title) > 30 else 34
+        t_surf = self._render_cached_text(title, title_size, bold=True, color=NORD6)
         self.screen.blit(t_surf, (cx - t_surf.get_width() // 2, 90))
 
-        a_surf = self._load_font(20, bold=True).render(artist, True, NORD8)
+        a_surf = self._render_cached_text(artist, 20, bold=True, color=NORD8)
         self.screen.blit(a_surf, (cx - a_surf.get_width() // 2, 138))
 
         # Auto-Hide Check (4.0 Sekunden Inaktivitaet)
@@ -3493,7 +3571,7 @@ class SNfetchDashboard:
             self.draw_5_button_cockpit(self.screen, card_x + 16, card_y + 14, card_w - 32, height=108)
         else:
             # Dezenter Hinweis wenn ausgeblendet
-            hint_s = self._load_font(13).render("ON-SCREEN MENU HIDDEN • PRESS D-PAD TO SHOW • [B] TO EXIT", True, NORD3)
+            hint_s = self._render_cached_text("ON-SCREEN MENU HIDDEN • PRESS D-PAD TO SHOW • [B] TO EXIT", 13, bold=False, color=NORD3)
             self.screen.blit(hint_s, (cx - hint_s.get_width() // 2, 738))
 
     # =========================================================================
@@ -3510,11 +3588,11 @@ class SNfetchDashboard:
         lx += logo_w + 14
 
         title_text = custom_title if custom_title else "STATION NORTH"
-        title_surf = self._load_font(24, bold=True).render(title_text, True, NORD6)
+        title_surf = self._render_cached_text(title_text, 24, bold=True, color=NORD6)
         self.screen.blit(title_surf, (lx, 7))
 
         sub_text = subtitle if subtitle else "CYBERDECK MEDIA SUITE • v7.0"
-        sub_surf = self._load_font(15, bold=True).render(sub_text, True, NORD8)
+        sub_surf = self._render_cached_text(sub_text, 15, bold=True, color=NORD8)
         self.screen.blit(sub_surf, (lx, 33))
 
         # Statusleiste rechts (WLAN, Batterie & Uhrzeit)
@@ -3536,12 +3614,12 @@ class SNfetchDashboard:
         pygame.draw.rect(self.screen, bat_color, (bx + 3, by + 3, fill_w, 10))
 
         charge_symbol = "⚡" if is_charging else ""
-        bat_surf = self._load_font(15, bold=True).render(f"{charge_symbol}{bat_cap}%", True, bat_color)
+        bat_surf = self._render_cached_text(f"{charge_symbol}{bat_cap}%", 15, bold=True, color=bat_color)
         self.screen.blit(bat_surf, (bx + 32, 17))
 
         # 3. Uhrzeit
         time_str = self.hardware.get_time_str()
-        time_surf = self._load_font(22, bold=True).render(time_str, True, NORD6)
+        time_surf = self._render_cached_text(time_str, 22, bold=True, color=NORD6)
         self.screen.blit(time_surf, (932, 14))
 
     # =========================================================================
@@ -3566,18 +3644,18 @@ class SNfetchDashboard:
         cx = card1_x + card1_w // 2
 
         if self.is_station_drop:
-            drop_s = self._load_font(36, bold=True).render("STATION NORTH IDENT", True, NORD8)
+            drop_s = self._render_cached_text("STATION NORTH IDENT", 36, bold=True, color=NORD8)
             self.screen.blit(drop_s, (cx - drop_s.get_width() // 2, card1_y + 40))
-            sub_s = self._load_font(20, bold=True).render("LIVE JINGLE BROADCAST", True, NORD13)
+            sub_s = self._render_cached_text("LIVE JINGLE BROADCAST", 20, bold=True, color=NORD13)
             self.screen.blit(sub_s, (cx - sub_s.get_width() // 2, card1_y + 85))
         else:
-            sn_s = self._load_font(54, bold=True).render("SN", True, NORD6)
+            sn_s = self._render_cached_text("SN", 54, bold=True, color=NORD6)
             self.screen.blit(sn_s, (cx - sn_s.get_width() // 2, card1_y + 20))
 
-            sub_sn = self._load_font(18, bold=True).render("Station North", True, NORD4)
+            sub_sn = self._render_cached_text("Station North", 18, bold=True, color=NORD4)
             self.screen.blit(sub_sn, (cx - sub_sn.get_width() // 2, card1_y + 76))
 
-            stream_s = self._load_font(22, bold=True).render("SN-RADIO AUDIO STREAM", True, NORD8)
+            stream_s = self._render_cached_text("SN-RADIO AUDIO STREAM", 22, bold=True, color=NORD8)
             self.screen.blit(stream_s, (cx - stream_s.get_width() // 2, card1_y + 106))
 
         # Vollbreiter organischer Wellen-Visualizer mit bunten Kappen
@@ -3598,15 +3676,13 @@ class SNfetchDashboard:
 
         # Song-Titel zentriert
         disp_title = self.station_drop_title if self.is_station_drop else title
-        title_font = self._load_font(30, bold=True)
-        if len(disp_title) > 34:
-            title_font = self._load_font(24, bold=True)
-        t_surf = title_font.render(disp_title, True, NORD6)
+        title_size = 24 if len(disp_title) > 34 else 30
+        t_surf = self._render_cached_text(disp_title, title_size, bold=True, color=NORD6)
         self.screen.blit(t_surf, (cx - t_surf.get_width() // 2, card2_y + 14))
 
         # Interpret zentriert
         disp_artist = "The Queen's Frequency" if self.is_station_drop else artist
-        a_surf = self._load_font(20, bold=True).render(disp_artist, True, NORD4)
+        a_surf = self._render_cached_text(disp_artist, 20, bold=True, color=NORD4)
         self.screen.blit(a_surf, (cx - a_surf.get_width() // 2, card2_y + 50))
 
         # 5 Große Chunky Buttons
@@ -3657,27 +3733,21 @@ class SNfetchDashboard:
         cx = card1_x + card1_w // 2
 
         # "PRESS for FULLSCREEN" zentriert
-        p_font = self._load_font(36, bold=True)
-        f_font = self._load_font(56, bold=True)
-
-        p_sh = p_font.render("PRESS for", True, (15, 18, 24))
-        f_sh = f_font.render("FULLSCREEN", True, (15, 18, 24))
+        p_sh = self._render_cached_text("PRESS for", 36, bold=True, color=(15, 18, 24))
+        f_sh = self._render_cached_text("FULLSCREEN", 56, bold=True, color=(15, 18, 24))
         self.screen.blit(p_sh, (cx - p_sh.get_width() // 2 + 2, card1_y + 112))
         self.screen.blit(f_sh, (cx - f_sh.get_width() // 2 + 3, card1_y + 162))
 
-        p_s = p_font.render("PRESS for", True, NORD6)
-        f_s = f_font.render("FULLSCREEN", True, NORD6)
+        p_s = self._render_cached_text("PRESS for", 36, bold=True, color=NORD6)
+        f_s = self._render_cached_text("FULLSCREEN", 56, bold=True, color=NORD6)
         self.screen.blit(p_s, (cx - p_s.get_width() // 2, card1_y + 110))
         self.screen.blit(f_s, (cx - f_s.get_width() // 2, card1_y + 160))
 
         # SN Wasserzeichen unten rechts
-        if self.logo_large:
+        if self.logo_tv_wm:
             wm_w, wm_h = 76, 76
-            wm = pygame.transform.smoothscale(self.logo_large, (wm_w, wm_h))
-            wm.set_alpha(165)
-            self.screen.blit(wm, (card1_x + card1_w - wm_w - 24, card1_y + card1_h - wm_h - 22))
-            wm_txt = self._load_font(15, bold=True).render("Station North", True, (220, 220, 220))
-            wm_txt.set_alpha(165)
+            self.screen.blit(self.logo_tv_wm, (card1_x + card1_w - wm_w - 24, card1_y + card1_h - wm_h - 22))
+            wm_txt = self._render_cached_text("Station North", 15, bold=True, color=(220, 220, 220))
             self.screen.blit(wm_txt, (card1_x + card1_w - wm_txt.get_width() - 24, card1_y + card1_h - 22))
 
         # 2. Untere Karte: Titel, Artist & 5 Große Chunky Buttons
@@ -3688,13 +3758,11 @@ class SNfetchDashboard:
         pygame.draw.rect(self.screen, NORD1, (card2_x, card2_y, card2_w, card2_h), border_radius=16)
         pygame.draw.rect(self.screen, NORD2, (card2_x, card2_y, card2_w, card2_h), width=1, border_radius=16)
 
-        title_font = self._load_font(30, bold=True)
-        if len(title) > 34:
-            title_font = self._load_font(24, bold=True)
-        t_surf = title_font.render(title, True, NORD6)
+        title_size = 24 if len(title) > 34 else 30
+        t_surf = self._render_cached_text(title, title_size, bold=True, color=NORD6)
         self.screen.blit(t_surf, (cx - t_surf.get_width() // 2, card2_y + 14))
 
-        a_surf = self._load_font(20, bold=True).render(artist, True, NORD4)
+        a_surf = self._render_cached_text(artist, 20, bold=True, color=NORD4)
         self.screen.blit(a_surf, (cx - a_surf.get_width() // 2, card2_y + 50))
 
         btn_area_x = card2_x + 16
@@ -4105,30 +4173,42 @@ class SNfetchDashboard:
     # =========================================================================
     # RENDERER 7: BOTTOM BAR (UNIFIED PILL BADGE FOOTER)
     # =========================================================================
+    _bottom_bar_cache: Dict[Tuple, pygame.Surface] = {}
+
     def draw_bottom_bar(self, pills: Optional[List[Tuple[str, str, Tuple[int, int, int]]]] = None, custom_controls: Optional[str] = None, right_text: str = "v7.0 • Back to the Rules"):
+        cache_key = (tuple(pills) if pills else None, custom_controls, right_text)
+        surf = self._bottom_bar_cache.get(cache_key)
+        if surf is None:
+            surf = pygame.Surface((SCREEN_WIDTH, 48))
+            surf.fill((28, 33, 42))
+            pygame.draw.line(surf, (46, 52, 64), (0, 0), (SCREEN_WIDTH, 0), 2)
+
+            cur_x = 24
+            if pills:
+                for key, text, col_bg in pills:
+                    k_txt = self._render_cached_text(key, 15, bold=True, color=(20, 24, 30))
+                    kw = max(28, k_txt.get_width() + 14)
+                    kh = 26
+                    ky = (48 - kh) // 2
+                    pygame.draw.rect(surf, col_bg, (cur_x, ky, kw, kh), border_radius=13)
+                    surf.blit(k_txt, (cur_x + (kw - k_txt.get_width()) // 2, ky + (kh - k_txt.get_height()) // 2))
+
+                    lbl = self._render_cached_text(text, 17, bold=True, color=NORD6)
+                    surf.blit(lbl, (cur_x + kw + 8, ky + (kh - lbl.get_height()) // 2))
+                    cur_x += kw + 8 + lbl.get_width() + 22
+            elif custom_controls:
+                ctrl_surf = self._render_cached_text(custom_controls, 17, bold=True, color=NORD6)
+                surf.blit(ctrl_surf, (24, (48 - ctrl_surf.get_height()) // 2))
+
+            ver_surf = self._render_cached_text(right_text, 16, bold=True, color=NORD4)
+            surf.blit(ver_surf, (SCREEN_WIDTH - 24 - ver_surf.get_width(), (48 - ver_surf.get_height()) // 2))
+
+            if len(self._bottom_bar_cache) > 32:
+                self._bottom_bar_cache.clear()
+            self._bottom_bar_cache[cache_key] = surf
+
         by = SCREEN_HEIGHT - 48
-        pygame.draw.rect(self.screen, (28, 33, 42), (0, by, SCREEN_WIDTH, 48))
-        pygame.draw.line(self.screen, (46, 52, 64), (0, by), (SCREEN_WIDTH, by), 2)
-
-        cur_x = 24
-        if pills:
-            for key, text, col_bg in pills:
-                k_txt = self._load_font(15, bold=True).render(key, True, (20, 24, 30))
-                kw = max(28, k_txt.get_width() + 14)
-                kh = 26
-                ky = by + (48 - kh) // 2
-                pygame.draw.rect(self.screen, col_bg, (cur_x, ky, kw, kh), border_radius=13)
-                self.screen.blit(k_txt, (cur_x + (kw - k_txt.get_width()) // 2, ky + (kh - k_txt.get_height()) // 2))
-
-                lbl = self._load_font(17, bold=True).render(text, True, NORD6)
-                self.screen.blit(lbl, (cur_x + kw + 8, ky + (kh - lbl.get_height()) // 2))
-                cur_x += kw + 8 + lbl.get_width() + 22
-        elif custom_controls:
-            ctrl_surf = self._load_font(17, bold=True).render(custom_controls, True, NORD6)
-            self.screen.blit(ctrl_surf, (24, by + (48 - ctrl_surf.get_height()) // 2))
-
-        ver_surf = self._load_font(16, bold=True).render(right_text, True, NORD4)
-        self.screen.blit(ver_surf, (SCREEN_WIDTH - 24 - ver_surf.get_width(), by + (48 - ver_surf.get_height()) // 2))
+        self.screen.blit(surf, (0, by))
 
     # =========================================================================
     # GLOBAL HARDWARE VOLUME OSD HUD
