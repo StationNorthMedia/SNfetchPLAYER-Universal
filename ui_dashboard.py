@@ -1227,36 +1227,56 @@ class SNfetchDashboard:
             pygame.draw.circle(raw_label, NORD4, (lcx, lcy), 13, width=2)
             pygame.draw.circle(raw_label, (255, 255, 255), (lcx - 3, lcy - 3), 3)
 
-            # 3. Pre-render 36 frames with living light glide & rotating label
+            # 3. Create master 2D round gradient light spot (~10% opacity, 90% transparency)
+            # Oval spot oriented radially across the vinyl grooves with zero hard edges
+            spot_w = 140
+            spot_h = 230
+            half_w = spot_w / 2.0
+            half_h = spot_h / 2.0
+
+            buf = bytearray(spot_w * spot_h * 4)
+            idx = 0
+            for y in range(spot_h):
+                ny = (y - half_h) / half_h
+                ny2 = ny * ny
+                for x in range(spot_w):
+                    nx = (x - half_w) / half_w
+                    dist2 = nx * nx + ny2
+                    if dist2 < 1.0:
+                        val = math.cos(math.sqrt(dist2) * math.pi * 0.5)
+                        alpha = int(26.0 * (val ** 1.3))  # Exactly ~10% max opacity (90% transparency)
+                        buf[idx] = 215      # Soft ice-blue highlight
+                        buf[idx + 1] = 235
+                        buf[idx + 2] = 255
+                        buf[idx + 3] = alpha
+                    idx += 4
+
+            spot_surf = pygame.image.frombuffer(bytes(buf), (spot_w, spot_h), 'RGBA')
+
+            # 4. Pre-render 36 frames with living light glide & rotating label
             self._vinyl_frames = []
+            r_mid = (label_r + radius) / 2.0
+
             for deg in range(0, 360, 10):
                 rad_t = math.radians(deg)
                 # Physical gentle boat-like sway (+/- 8 degrees around 2 o'clock)
                 wobble_angle = math.sin(rad_t) * 8.0
                 wobble_intensity = 0.88 + 0.12 * math.cos(rad_t * 2.0)
 
-                # Generate sheen for this frame
-                sheen_surf = pygame.Surface((full_size, full_size), pygame.SRCALPHA)
-                for center_base in (325, 145):
-                    center = center_base + wobble_angle
-                    for offset_10 in range(-450, 451, 3):
-                        d = offset_10 / 10.0
-                        gauss = math.exp(-0.5 * (d / 14.0) ** 2)
-                        wave = 0.75 + 0.25 * math.sin(d * 0.4 + rad_t * 3.0)
-                        alpha = int(32 * gauss * wave * wobble_intensity)
-                        if alpha <= 0:
-                            continue
-                        rad_ray = math.radians(center + d)
-                        sx = cx + math.cos(rad_ray) * (label_r + 2)
-                        sy = cy + math.sin(rad_ray) * (label_r + 2)
-                        ex = cx + math.cos(rad_ray) * (radius - 3)
-                        ey = cy + math.sin(rad_ray) * (radius - 3)
-                        pygame.draw.line(sheen_surf, (215, 235, 255, alpha), (sx, sy), (ex, ey), 3)
-
                 # Composite upper half frame
                 frame = pygame.Surface((full_size, radius), pygame.SRCALPHA)
                 frame.blit(base_disc, (0, 0), area=pygame.Rect(0, 0, full_size, radius))
-                frame.blit(sheen_surf, (0, 0), area=pygame.Rect(0, 0, full_size, radius), special_flags=pygame.BLEND_ADD)
+
+                # Natural 2 o'clock round gradient sheen gliding with the wobble
+                theta = 325.0 + wobble_angle
+                spot_cx = cx + math.cos(math.radians(theta)) * r_mid
+                spot_cy = cy + math.sin(math.radians(theta)) * r_mid
+
+                rot_spot = pygame.transform.rotate(spot_surf, -55.0 - wobble_angle)
+                rot_spot.set_alpha(int(255 * wobble_intensity))
+                spot_rect = rot_spot.get_rect(center=(int(spot_cx), int(spot_cy)))
+                # Standard alpha blit: 10% opacity, 90% transparency, no lines or hard edges
+                frame.blit(rot_spot, spot_rect.topleft)
 
                 # Rotate label and blit at (cx, radius)
                 rot_label = pygame.transform.rotate(raw_label, -deg)
