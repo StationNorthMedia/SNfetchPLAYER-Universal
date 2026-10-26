@@ -4662,7 +4662,7 @@ class SNfetchDashboard:
             line1 = self._render_cached_text("STATION NORTH • TV BROADCAST", 20, bold=True, color=NORD6)
             line2 = self._render_cached_text("Hardware DRM Video Pipeline (Mali-G31 Direct)", 14, bold=True, color=NORD8)
             line3 = self._render_cached_text("● [A] Button  : Launch Fullscreen Playback", 14, bold=True, color=NORD14)
-            line4 = self._render_cached_text("● D-Pad ◄/►   : Prev / Next Station & Video", 13, bold=False, color=NORD4)
+            line4 = self._render_cached_text("● D-Pad ▲/▼   : Prev / Next Station & Video", 13, bold=False, color=NORD4)
             line5 = self._render_cached_text("● [B] Button  : Return to Main Menu (Deck)", 13, bold=False, color=NORD4)
             hint_str = "[A] LAUNCH FULLSCREEN • [B] MAIN MENU"
             fs_hint_str = "[A] FULLSCREEN • [B] MENU"
@@ -4768,8 +4768,9 @@ class SNfetchDashboard:
 
         # Harmonized Bottom Bar with Pills
         tv_pills = [
-            ("A / [0]", "Zoom Fullscreen", NORD8),
-            ("◄/►", "Channel", NORD14),
+            ("A", "Fullscreen", NORD8),
+            ("▲/▼", "Channel", NORD14),
+            ("◄/►", "Cockpit", NORD9),
             ("B", "Main Menu", NORD11)
         ]
         self.draw_bottom_bar(pills=tv_pills, right_text="Station North • Television")
@@ -5442,20 +5443,14 @@ class SNfetchDashboard:
                     self.trigger_play_track_async(self.current_idx)
                     return True
                 elif self.splash_cursor == 1:
+                    self.state = STATE_TV
+                    self.cockpit_focus_idx = 0
+                    self._state_transition_time = time.time()
+                    pygame.event.clear()
                     self._load_active_playlist(is_tv=True)
                     if self.platform.is_pc:
-                        self.state = STATE_TV
-                        self._state_transition_time = time.time()
-                        pygame.event.clear()
                         self.trigger_play_tv_track_async(self.current_idx)
-                        return True
-                    else:
-                        self.launch_video_playback(self.current_idx, manual_trigger=True)
-                        self.state = STATE_SPLASH
-                        self.splash_enter_time = time.time()
-                        self._state_transition_time = time.time()
-                        pygame.event.clear()
-                        return True
+                    return True
                 elif self.splash_cursor == 2:
                     self.state = STATE_CHRONICLES
                     self._state_transition_time = time.time()
