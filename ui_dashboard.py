@@ -4219,12 +4219,12 @@ class SNfetchDashboard:
             elif is_celebrating:
                 hdr_text = "✦ ALL MEDIA ASSETS SYNCHRONIZED (100% READY) ✦"
                 hdr_col = NORD14
-                sub_text = "174 Station Jingles   •   42 Retro TV Idents (4:3)   •   131 Chronicles Pages & Lore Audio Ready"
+                sub_text = "174 Station Jingles  •  42 Retro TV Idents (4:3)  •  131 Chronicles & Lore Audio Ready"
                 sub_col = (255, 255, 255)
             else:
                 hdr_text = f"ASSETS INCOMPLETE ({int(pct)}% READY) • OFFLINE MODE"
                 hdr_col = NORD13
-                sub_text = f"Local Assets: {j_found}/174 Jingles   •   {t_found}/42 TV Idents   •   {c_found}/131 Chronicles"
+                sub_text = f"Local Assets: {j_found}/174 Jingles  •  {t_found}/42 TV Idents  •  {c_found}/131 Chronicles Ready"
                 sub_col = NORD5
 
             # Header with indicator dot
@@ -4232,15 +4232,21 @@ class SNfetchDashboard:
             sync_title = self._load_font(21, bold=True).render(hdr_text, True, hdr_col)
             self.screen.blit(sync_title, (box_x + 50, box_y + 20))
 
-            # Subtext breakdown
-            details_surf = self._load_font(17, bold=True).render(sub_text, True, sub_col)
-            self.screen.blit(details_surf, (box_x + 28, box_y + 52))
+            # Subtext breakdown (wrapped to guarantee zero horizontal overflow)
+            max_sub_w = box_w - 56
+            sub_font = self._load_font(15, bold=True)
+            sub_lines = self._render_wrapped_lines(sub_text, sub_font, max_sub_w)
+            sub_y = box_y + 48
+            for s_line in sub_lines[:2]:
+                s_surf = sub_font.render(s_line, True, sub_col)
+                self.screen.blit(s_surf, (box_x + 28, sub_y))
+                sub_y += 20
 
-            # Segmented LED Progress Bar (Cyberdeck Style: 30 rectangles with 4px gap)
+            # Dynamic bar position depending on subtext line count
             bar_w = box_w - 56
             bar_h = 16
             bar_x = box_x + 28
-            bar_y = box_y + 82
+            bar_y = box_y + (90 if len(sub_lines) > 1 else 76)
             num_segs = 30
             seg_gap = 4
             total_gaps = (num_segs - 1) * seg_gap
@@ -4259,19 +4265,19 @@ class SNfetchDashboard:
                     pygame.draw.rect(self.screen, (38, 44, 56), s_rect, width=1, border_radius=3)
 
             # Divider line and lower quote section
-            div_y = box_y + 112
+            div_y = bar_y + bar_h + 12
             pygame.draw.line(self.screen, (46, 52, 64), (box_x + 28, div_y), (box_x + box_w - 28, div_y), 1)
 
             badge_surf = self._render_cached_text("✦ QUEEN DIRECTIVES // TRANSMISSION FEED ✦", 14, bold=True, color=NORD9)
-            self.screen.blit(badge_surf, (box_x + 28, box_y + 122))
+            self.screen.blit(badge_surf, (box_x + 28, div_y + 8))
 
-            max_visible_lines = 4
+            max_visible_lines = 3 if len(sub_lines) > 1 else 4
             q_font = self._load_font(19, bold=True)
             max_q_w = box_w - 56
             quote_lines = self._render_wrapped_lines(f"“{self.current_quote}”", q_font, max_q_w)
             visible_lines = quote_lines[:max_visible_lines]
-            line_y = box_y + 148
-            line_h = 26
+            line_y = div_y + 32
+            line_h = 24
             for line in visible_lines:
                 q_surf = self._render_cached_text(line, 19, bold=True, color=self.current_quote_color)
                 self.screen.blit(q_surf, (box_x + 28, line_y))
@@ -4650,40 +4656,106 @@ class SNfetchDashboard:
         scrim.fill((0, 0, 0, 125))
         self.screen.blit(scrim, (vm_x, vm_y))
 
-        # Status badge
-        is_active = self.is_tv_playing and (not self.tv_companion or not self.tv_companion.is_paused)
+        # Status badge (Frosted Pill)
+        is_active = (self.is_tv_playing and (not self.direct_video_player or not self.direct_video_player.is_paused)) if self.platform.is_handheld else (self.is_tv_playing and (not self.tv_companion or not self.tv_companion.is_paused))
         stat_col = NORD14 if is_active else (NORD13 if self.is_resolving else NORD9)
-        stat_str = "● BROADCAST FEED ACTIVE (60 FPS GPU)" if is_active else ("TUNING SATELLITE FEED..." if self.is_resolving else "SATELLITE STANDBY")
+        if self.platform.is_handheld:
+            stat_str = "● BROADCAST FEED ACTIVE (MALI-G31)" if is_active else ("TUNING SATELLITE FEED..." if self.is_resolving else "● SATELLITE STANDBY (DIRECT DRM)")
+        else:
+            stat_str = "● BROADCAST FEED ACTIVE (60 FPS GPU)" if is_active else ("TUNING SATELLITE FEED..." if self.is_resolving else "● SATELLITE STANDBY (OPENGL)")
+
         b_tag = self._render_cached_text(stat_str, 18, bold=True, color=stat_col)
-        self.screen.blit(b_tag, (vm_x + 24, vm_y + 24))
+        badge_w = b_tag.get_width() + 28
+        badge_h = 34
+        badge_pill = pygame.Rect(vm_x + 20, vm_y + 18, badge_w, badge_h)
+        pygame.draw.rect(self.screen, (22, 27, 36), badge_pill, border_radius=10)
+        pygame.draw.rect(self.screen, (56, 64, 78), badge_pill, width=1, border_radius=10)
+        self.screen.blit(b_tag, (vm_x + 34, vm_y + 24))
 
         # Handheld vs PC Architecture & Controls Specification
+        title_y = vm_y + 66
+        sub_y = title_y + 36
         if self.platform.is_handheld:
-            line1 = self._render_cached_text("STATION NORTH • TV BROADCAST", 20, bold=True, color=NORD6)
-            line2 = self._render_cached_text("Hardware DRM Video Pipeline (Mali-G31 Direct)", 14, bold=True, color=NORD8)
-            line3 = self._render_cached_text("● [A] Button  : Launch Fullscreen Playback", 14, bold=True, color=NORD14)
-            line4 = self._render_cached_text("● D-Pad ▲/▼   : Prev / Next Station & Video", 13, bold=False, color=NORD4)
-            line5 = self._render_cached_text("● [B] Button  : Return to Main Menu (Deck)", 13, bold=False, color=NORD4)
+            line1 = self._render_cached_text("STATION NORTH • TV BROADCAST", 26, bold=True, color=NORD6)
+            line2 = self._render_cached_text("Hardware DRM Video Pipeline (Mali-G31 Direct)", 16, bold=True, color=NORD8)
             hint_str = "[A] LAUNCH FULLSCREEN • [B] MAIN MENU"
             fs_hint_str = "[A] FULLSCREEN • [B] MENU"
         else:
-            line1 = self._render_cached_text("STATION NORTH • PC SUITE EMULATION", 20, bold=True, color=NORD6)
-            line2 = self._render_cached_text("Companion Video Engine: PyQt6 + libmpv OpenGL Pipeline", 14, bold=True, color=NORD8)
-            line3 = self._render_cached_text("Target Hardware: dArkOS / RK3326 Handheld (Mali-G31 DRM)", 13, bold=False, color=NORD4)
-            line4 = self._render_cached_text("On Handhelds, video renders zero-latency direct to KMS/DRM framebuffer.", 12, bold=False, color=NORD4)
-            line5 = self._render_cached_text("On PC, broadcast is projected into the dedicated GPU companion window.", 12, bold=False, color=NORD4)
+            line1 = self._render_cached_text("STATION NORTH • PC SUITE EMULATION", 26, bold=True, color=NORD6)
+            line2 = self._render_cached_text("Companion Video Engine: PyQt6 + libmpv OpenGL Pipeline", 16, bold=True, color=NORD8)
             hint_str = "[0] / CLICK: FULLSCREEN VIDEO • [ESC] DECK"
             fs_hint_str = "DOUBLE-CLICK / [0] FOR FULLSCREEN"
 
-        self.screen.blit(line1, (vm_x + 24, vm_y + 140))
-        self.screen.blit(line2, (vm_x + 24, vm_y + 172))
-        self.screen.blit(line3, (vm_x + 24, vm_y + 200))
-        self.screen.blit(line4, (vm_x + 24, vm_y + 226))
-        self.screen.blit(line5, (vm_x + 24, vm_y + 246))
+        self.screen.blit(line1, (vm_x + 20, title_y))
+        self.screen.blit(line2, (vm_x + 20, sub_y))
 
-        # Bottom Hint
-        hint_s = self._render_cached_text(hint_str, 13, bold=True, color=NORD13)
-        self.screen.blit(hint_s, (vm_x + (vid_w - hint_s.get_width()) // 2, vm_y + vid_h - 32))
+        # Horizontal accent line
+        pygame.draw.line(self.screen, (46, 52, 64), (vm_x + 20, sub_y + 28), (vm_x + vid_w - 20, sub_y + 28), 1)
+
+        # Controls Card Box (Height = 224px)
+        cbox_x = vm_x + 18
+        cbox_y = sub_y + 40
+        cbox_w = vid_w - 36
+        cbox_h = 224
+        cbox_rect = pygame.Rect(cbox_x, cbox_y, cbox_w, cbox_h)
+        pygame.draw.rect(self.screen, (22, 27, 37, 210), cbox_rect, border_radius=12)
+        pygame.draw.rect(self.screen, (52, 60, 74), cbox_rect, width=1, border_radius=12)
+
+        if self.platform.is_handheld:
+            # Row 1: [A] Button
+            t1 = self._render_cached_text("● [A] Button :", 20, bold=True, color=NORD14)
+            v1 = self._render_cached_text(" Launch Fullscreen Playback", 20, bold=True, color=NORD6)
+            self.screen.blit(t1, (cbox_x + 18, cbox_y + 18))
+            self.screen.blit(v1, (cbox_x + 18 + t1.get_width(), cbox_y + 18))
+
+            # Row 2: D-Pad Up/Down
+            t2 = self._render_cached_text("● D-Pad ▲/▼ :", 20, bold=True, color=NORD8)
+            v2 = self._render_cached_text(" Prev / Next Station Track", 20, bold=True, color=NORD6)
+            self.screen.blit(t2, (cbox_x + 18, cbox_y + 66))
+            self.screen.blit(v2, (cbox_x + 18 + t2.get_width(), cbox_y + 66))
+
+            # Row 3: [B] Button
+            t3 = self._render_cached_text("● [B] Button :", 20, bold=True, color=NORD11)
+            v3 = self._render_cached_text(" Return to Main Menu (Deck)", 20, bold=True, color=NORD6)
+            self.screen.blit(t3, (cbox_x + 18, cbox_y + 114))
+            self.screen.blit(v3, (cbox_x + 18 + t3.get_width(), cbox_y + 114))
+
+            # Row 4: Cockpit navigation hint
+            hint4 = self._render_cached_text("● D-Pad ◄/► highlights buttons in lower cockpit", 15, bold=False, color=NORD4)
+            self.screen.blit(hint4, (cbox_x + 18, cbox_y + 168))
+        else:
+            # Row 1: Double click / [0]
+            t1 = self._render_cached_text("● [0] / Click :", 20, bold=True, color=NORD14)
+            v1 = self._render_cached_text(" Launch Fullscreen Video", 20, bold=True, color=NORD6)
+            self.screen.blit(t1, (cbox_x + 18, cbox_y + 18))
+            self.screen.blit(v1, (cbox_x + 18 + t1.get_width(), cbox_y + 18))
+
+            # Row 2: Station navigation
+            t2 = self._render_cached_text("● D-Pad ▲/▼ :", 20, bold=True, color=NORD8)
+            v2 = self._render_cached_text(" Change Station & Video", 20, bold=True, color=NORD6)
+            self.screen.blit(t2, (cbox_x + 18, cbox_y + 66))
+            self.screen.blit(v2, (cbox_x + 18 + t2.get_width(), cbox_y + 66))
+
+            # Row 3: Back to Menu
+            t3 = self._render_cached_text("● [ESC] / [B] :", 20, bold=True, color=NORD11)
+            v3 = self._render_cached_text(" Return to Main Menu (Deck)", 20, bold=True, color=NORD6)
+            self.screen.blit(t3, (cbox_x + 18, cbox_y + 114))
+            self.screen.blit(v3, (cbox_x + 18 + t3.get_width(), cbox_y + 114))
+
+            # Row 4: Mouse / Cockpit hint
+            hint4 = self._render_cached_text("● Mouse or Arrow Keys ◄/► control cockpit deck", 15, bold=False, color=NORD4)
+            self.screen.blit(hint4, (cbox_x + 18, cbox_y + 168))
+
+        # Bottom Full-Width Banner Pill
+        pill_x = vm_x + 18
+        pill_y = vm_y + vid_h - 48
+        pill_w = vid_w - 36
+        pill_h = 36
+        pill_rect = pygame.Rect(pill_x, pill_y, pill_w, pill_h)
+        pygame.draw.rect(self.screen, (22, 27, 36), pill_rect, border_radius=10)
+        pygame.draw.rect(self.screen, (56, 64, 78), pill_rect, width=1, border_radius=10)
+        hint_s = self._render_cached_text(hint_str, 17, bold=True, color=NORD13)
+        self.screen.blit(hint_s, (pill_x + (pill_w - hint_s.get_width()) // 2, pill_y + (pill_h - hint_s.get_height()) // 2))
 
         # Inner CRT Border
         pygame.draw.rect(self.screen, NORD3, vm_rect, width=2, border_radius=8)
@@ -4745,25 +4817,25 @@ class SNfetchDashboard:
         fs_hint = self._render_cached_text(fs_hint_str, 14, bold=True, color=NORD13)
         self.screen.blit(fs_hint, (rp_x + (rp_w - fs_hint.get_width()) // 2, rp_y + rp_h - 28))
 
-        # 2. Untere Karte (Card 2): Kompakte Cockpit-Box (Height = 130px)
+        # 2. Untere Karte (Card 2): Kompakte Cockpit-Box (Height = 138px)
         card2_x = 20
-        card2_y = 574
+        card2_y = 568
         card2_w = 984
-        card2_h = 130
+        card2_h = 138
         pygame.draw.rect(self.screen, NORD1, (card2_x, card2_y, card2_w, card2_h), border_radius=16)
         pygame.draw.rect(self.screen, NORD2, (card2_x, card2_y, card2_w, card2_h), width=1, border_radius=16)
 
-        title_size = 22 if len(title) > 38 else 26
+        title_size = 20 if len(title) > 38 else 24
         t_surf = self._render_cached_text(title, title_size, bold=True, color=NORD6)
         self.screen.blit(t_surf, (card2_x + 24, card2_y + 10))
 
-        a_surf = self._render_cached_text(f"{artist} • Television Broadcast", 18, bold=True, color=NORD4)
-        self.screen.blit(a_surf, (card2_x + 24, card2_y + 34))
+        a_surf = self._render_cached_text(f"{artist} • Television Broadcast", 16, bold=True, color=NORD4)
+        self.screen.blit(a_surf, (card2_x + 24, card2_y + 36))
 
         # 5 Kompakte Cockpit-Buttons (Height = 62px)
         btn_area_x = card2_x + 16
         btn_area_w = card2_w - 32
-        btn_y = card2_y + 58
+        btn_y = card2_y + 64
         self.draw_5_button_cockpit(self.screen, btn_area_x, btn_y, btn_area_w, height=62)
 
         # Harmonized Bottom Bar with Pills
