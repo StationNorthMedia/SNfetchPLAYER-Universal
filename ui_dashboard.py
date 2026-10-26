@@ -24,6 +24,7 @@ import sys
 import os
 import json
 import time
+import socket
 import math
 import struct
 import random
@@ -2552,6 +2553,10 @@ class SNfetchDashboard:
         conf_path = Path("/tmp/sn_mpv_pc.conf")
         try:
             conf_path.write_text(
+                "MBTN_LEFT script-message mouse_click ${mouse-pos/x} ${mouse-pos/y}\n"
+                "MBTN_LEFT_DBL cycle fullscreen\n"
+                "WHEEL_UP add volume 5\n"
+                "WHEEL_DOWN add volume -5\n"
                 "q quit 4\n"
                 "ESC quit 4\n"
                 "BS quit 4\n"
@@ -2567,6 +2572,39 @@ class SNfetchDashboard:
         except Exception:
             pass
         return str(conf_path)
+
+    def _generate_video_cockpit_raw(self, focused_idx: int = 2, is_paused: bool = False) -> Tuple[str, int, int]:
+        """Generates a raw BGRA image file for mpv overlay-add containing the authentic 5-button cockpit"""
+        card_w = 900
+        card_h = 136
+        surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+        pygame.draw.rect(surf, (46, 52, 64, 235), (0, 0, card_w, card_h), border_radius=18)
+        pygame.draw.rect(surf, (67, 76, 94, 255), (0, 0, card_w, card_h), width=2, border_radius=18)
+
+        old_focus = self.cockpit_focus_idx
+        old_playing = self.is_playing
+        self.cockpit_focus_idx = focused_idx
+        self.is_playing = not is_paused
+
+        self.draw_5_button_cockpit(surf, 16, 14, card_w - 32, height=108)
+
+        self.cockpit_focus_idx = old_focus
+        self.is_playing = old_playing
+
+        raw_rgba = pygame.image.tobytes(surf, "RGBA")
+        raw_bgra = bytearray(len(raw_rgba))
+        raw_bgra[0::4] = raw_rgba[2::4]
+        raw_bgra[1::4] = raw_rgba[1::4]
+        raw_bgra[2::4] = raw_rgba[0::4]
+        raw_bgra[3::4] = raw_rgba[3::4]
+
+        raw_file = f"/tmp/sn_cockpit_overlay_{os.getpid()}.raw"
+        try:
+            with open(raw_file, "wb") as f:
+                f.write(raw_bgra)
+        except Exception:
+            pass
+        return raw_file, card_w, card_h
 
     def launch_video_playback(self, start_idx: int, manual_trigger: bool = True):
         """Plays video (windowed on PC, 4:3 fullscreen on handheld) with floating OSD on manual skip"""
@@ -2628,19 +2666,38 @@ class SNfetchDashboard:
             logo_overlay = self._get_tv_logo_overlay_path()
 
             # Platform-Specific Player Selection & Command:
+            ipc_socket = f"/tmp/sn_mpv_{os.getpid()}.sock"
             if self.platform.is_pc:
                 if shutil.which("mpv"):
                     conf_file = self._get_pc_mpv_input_conf()
+                    if os.path.exists(ipc_socket):
+                        try:
+                            os.remove(ipc_socket)
+                        except Exception:
+                            pass
+
+                    win_id = None
+                    if pygame.display.get_init():
+                        try:
+                            win_info = pygame.display.get_wm_info()
+                            win_id = win_info.get("window")
+                        except Exception:
+                            win_id = None
+
                     cmd = [
                         "mpv",
                         f"--input-conf={conf_file}",
-                        "--geometry=984x640",
-                        "--autofit=984x640",
+                        f"--input-ipc-server={ipc_socket}",
+                        "--no-osc",
                         "--keep-open=no",
-                        "--force-window=yes",
                         f"--sub-file={osd_file}",
-                        f"--title=STATION NORTH • {track_artist} - {track_title}",
+                        f"--title=Station North • {track_artist} - {track_title}",
                     ]
+                    if win_id:
+                        cmd.append(f"--wid={win_id}")
+                    else:
+                        cmd.extend(["--geometry=984x640", "--autofit=984x640"])
+
                     if logo_overlay:
                         cmd.extend([
                             f"--external-file={logo_overlay}",
@@ -2750,9 +2807,63 @@ class SNfetchDashboard:
             action = "AUTO"
             is_paused = False
 
+            ipc_sock = None
+            if self.platform.is_pc:
+                for _ in range(25):
+                    time.sleep(0.04)
+                    if os.path.exists(ipc_socket):
+                        try:
+                            ipc_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                            ipc_sock.connect(ipc_socket)
+                            break
+                        except Exception:
+                            pass
+
+                if ipc_sock:
+                    try:
+                        for prop in ("mouse-pos", "pause", "osd-dimensions", "fullscreen"):
+                            ipc_sock.sendall((json.dumps({"command": ["observe_property", 1, prop]}) + "\n").encode("utf-8"))
+                    except Exception:
+                        pass
+
+                focused_btn_idx = self.cockpit_focus_idx
+                overlay_visible = True
+                last_interaction_time = time.time()
+                osd_dim_w, osd_dim_h = SCREEN_WIDTH, SCREEN_HEIGHT
+                sock_buffer = ""
+
+                def _push_overlay():
+                    if not ipc_sock:
+                        return
+                    try:
+                        raw_f, cw, ch = self._generate_video_cockpit_raw(focused_btn_idx, is_paused)
+                        ov_x = max(0, (osd_dim_w - cw) // 2)
+                        ov_y = max(0, osd_dim_h - ch - 36)
+                        msg = json.dumps({
+                            "command": ["overlay-add", 0, ov_x, ov_y, raw_f, 0, "bgra", cw, ch, cw * 4, cw, ch]
+                        }) + "\n"
+                        ipc_sock.sendall(msg.encode("utf-8"))
+                    except Exception:
+                        pass
+
+                def _remove_overlay():
+                    if not ipc_sock:
+                        return
+                    try:
+                        msg = json.dumps({"command": ["overlay-remove", 0]}) + "\n"
+                        ipc_sock.sendall(msg.encode("utf-8"))
+                    except Exception:
+                        pass
+
+                _push_overlay()
+
             while proc.poll() is None:
                 should_break = False
                 if self.platform.is_pc:
+                    if overlay_visible and (time.time() - last_interaction_time > 3.8):
+                        overlay_visible = False
+                        _remove_overlay()
+
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             action = "EXIT"
@@ -2760,6 +2871,10 @@ class SNfetchDashboard:
                             should_break = True
                             break
                         elif event.type == pygame.KEYDOWN:
+                            last_interaction_time = time.time()
+                            if not overlay_visible:
+                                overlay_visible = True
+                                _push_overlay()
                             if event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_b):
                                 action = "EXIT"
                                 proc.terminate()
@@ -2776,23 +2891,134 @@ class SNfetchDashboard:
                                 should_break = True
                                 break
                             elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
-                                if is_paused:
-                                    os.kill(proc.pid, signal.SIGCONT)
-                                    is_paused = False
-                                else:
-                                    os.kill(proc.pid, signal.SIGSTOP)
-                                    is_paused = True
-                        elif event.type == pygame.MOUSEBUTTONDOWN:
-                            action = "EXIT"
-                            proc.terminate()
-                            should_break = True
-                            break
-                        elif event.type == pygame.MOUSEWHEEL:
-                            if event.y > 0:
-                                self._trigger_volume_change(+5)
-                            elif event.y < 0:
-                                self._trigger_volume_change(-5)
-                    time.sleep(0.04)
+                                if ipc_sock:
+                                    try:
+                                        ipc_sock.sendall((json.dumps({"command": ["cycle", "pause"]}) + "\n").encode("utf-8"))
+                                    except Exception:
+                                        pass
+                            elif event.key == pygame.K_f:
+                                if ipc_sock:
+                                    try:
+                                        ipc_sock.sendall((json.dumps({"command": ["cycle", "fullscreen"]}) + "\n").encode("utf-8"))
+                                    except Exception:
+                                        pass
+
+                    if should_break:
+                        break
+
+                    if ipc_sock:
+                        try:
+                            r, _, _ = select.select([ipc_sock], [], [], 0.04)
+                            if r:
+                                chunk = ipc_sock.recv(4096).decode("utf-8", errors="ignore")
+                                if not chunk:
+                                    break
+                                sock_buffer += chunk
+                                while "\n" in sock_buffer:
+                                    line, sock_buffer = sock_buffer.split("\n", 1)
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    try:
+                                        ev = json.loads(line)
+                                    except Exception:
+                                        continue
+
+                                    ev_type = ev.get("event")
+                                    if ev_type == "property-change":
+                                        p_name = ev.get("name")
+                                        p_val = ev.get("data")
+                                        if p_name == "mouse-pos" and p_val:
+                                            last_interaction_time = time.time()
+                                            if not overlay_visible:
+                                                overlay_visible = True
+                                                _push_overlay()
+                                            mx, my = p_val.get("x", 0), p_val.get("y", 0)
+                                            cw, ch = 900, 136
+                                            ov_x = max(0, (osd_dim_w - cw) // 2)
+                                            ov_y = max(0, osd_dim_h - ch - 36)
+                                            gap = 14
+                                            btn_w = (cw - 32 - 4 * gap) // 5
+                                            btn_h = 108
+                                            new_idx = focused_btn_idx
+                                            if ov_y + 14 <= my <= ov_y + 14 + btn_h:
+                                                for bi in range(5):
+                                                    bx = ov_x + 16 + bi * (btn_w + gap)
+                                                    if bx <= mx <= bx + btn_w:
+                                                        new_idx = bi
+                                                        break
+                                            if new_idx != focused_btn_idx:
+                                                focused_btn_idx = new_idx
+                                                _push_overlay()
+                                        elif p_name == "pause":
+                                            is_paused = bool(p_val)
+                                            if overlay_visible:
+                                                _push_overlay()
+                                        elif p_name == "osd-dimensions" and p_val:
+                                            osd_dim_w = p_val.get("w", SCREEN_WIDTH)
+                                            osd_dim_h = p_val.get("h", SCREEN_HEIGHT)
+                                            if overlay_visible:
+                                                _push_overlay()
+
+                                    elif ev_type == "client-message":
+                                        c_args = ev.get("args", [])
+                                        if c_args and c_args[0] == "mouse_click":
+                                            last_interaction_time = time.time()
+                                            if not overlay_visible:
+                                                overlay_visible = True
+                                                _push_overlay()
+                                            else:
+                                                try:
+                                                    cmx = int(float(c_args[1]))
+                                                    cmy = int(float(c_args[2]))
+                                                except Exception:
+                                                    cmx, cmy = 0, 0
+                                                cw, ch = 900, 136
+                                                ov_x = max(0, (osd_dim_w - cw) // 2)
+                                                ov_y = max(0, osd_dim_h - ch - 36)
+                                                gap = 14
+                                                btn_w = (cw - 32 - 4 * gap) // 5
+                                                btn_h = 108
+                                                clicked_button = None
+                                                if ov_y + 14 <= cmy <= ov_y + 14 + btn_h:
+                                                    for bi in range(5):
+                                                        bx = ov_x + 16 + bi * (btn_w + gap)
+                                                        if bx <= cmx <= bx + btn_w:
+                                                            clicked_button = bi
+                                                            break
+                                                if clicked_button == 0:
+                                                    try:
+                                                        ipc_sock.sendall((json.dumps({"command": ["cycle", "fullscreen"]}) + "\n").encode("utf-8"))
+                                                    except Exception:
+                                                        pass
+                                                elif clicked_button == 1:
+                                                    action = "PREV"
+                                                    try:
+                                                        ipc_sock.sendall((json.dumps({"command": ["quit", 6]}) + "\n").encode("utf-8"))
+                                                    except Exception:
+                                                        pass
+                                                    should_break = True
+                                                    break
+                                                elif clicked_button == 2:
+                                                    try:
+                                                        ipc_sock.sendall((json.dumps({"command": ["cycle", "pause"]}) + "\n").encode("utf-8"))
+                                                    except Exception:
+                                                        pass
+                                                elif clicked_button == 3:
+                                                    action = "NEXT"
+                                                    try:
+                                                        ipc_sock.sendall((json.dumps({"command": ["quit", 5]}) + "\n").encode("utf-8"))
+                                                    except Exception:
+                                                        pass
+                                                    should_break = True
+                                                    break
+                                                elif clicked_button == 4:
+                                                    self.shuffle_mgr.toggle_repeat()
+                                                    _push_overlay()
+                        except Exception:
+                            pass
+                    else:
+                        time.sleep(0.04)
                 else:
                     # Handheld Hardware Gamepad Events
                     if ({314, 315}.issubset(input_reader.pressed_keys) or 
@@ -2850,6 +3076,17 @@ class SNfetchDashboard:
 
                 if should_break:
                     break
+
+            if ipc_sock:
+                try:
+                    ipc_sock.close()
+                except Exception:
+                    pass
+            if os.path.exists(ipc_socket):
+                try:
+                    os.remove(ipc_socket)
+                except Exception:
+                    pass
 
             if input_reader:
                 input_reader.close()
@@ -2918,15 +3155,27 @@ class SNfetchDashboard:
                 return True
             try:
                 conf_file = self._get_pc_mpv_input_conf()
-                proc = subprocess.Popen([
+                win_id = None
+                if pygame.display.get_init():
+                    try:
+                        win_info = pygame.display.get_wm_info()
+                        win_id = win_info.get("window")
+                    except Exception:
+                        win_id = None
+
+                cmd = [
                     "mpv",
                     f"--input-conf={conf_file}",
-                    "--geometry=984x640",
-                    "--autofit=984x640",
+                    "--no-osc",
                     "--keep-open=no",
                     "--title=STATION NORTH TV IDENT",
-                    str(clip_path)
-                ], stdin=subprocess.DEVNULL)
+                ]
+                if win_id:
+                    cmd.append(f"--wid={win_id}")
+                else:
+                    cmd.extend(["--geometry=984x640", "--autofit=984x640"])
+                cmd.append(str(clip_path))
+                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
                 interrupted = False
                 while proc.poll() is None:
                     for ev in pygame.event.get():

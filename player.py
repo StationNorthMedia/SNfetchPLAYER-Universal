@@ -18,6 +18,8 @@ platform_info = get_platform()
 platform_info.print_diagnostics()
 
 import os
+if platform_info.is_pc:
+    os.environ.setdefault("SDL_VIDEODRIVER", "x11")
 if platform_info.is_handheld:
     os.environ.setdefault("SDL_RENDERER_DRIVER", "opengles2")
 

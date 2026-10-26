@@ -17,5 +17,6 @@ fi
 
 echo "🚀 Starte Station North SNfetchPLAYER im PC-Fenstermodus..."
 export SN_WINDOWED=1
+export SDL_VIDEODRIVER=x11
 cd "$DIR"
 exec "$PYTHON_CMD" -W ignore player.py "$@"
