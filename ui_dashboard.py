@@ -322,6 +322,24 @@ class IntegratedVisualizer:
         self.last_audio_feed = 0.0
         self.peak_energy = 15000.0  # Adaptiver Dynamik-Baseline-Wert (AGC)
 
+        # Precomputations for zero-dependency Cooley-Tukey Radix-2 FFT (parity when numpy is absent)
+        self._fft_n = 256
+        self._rev = [0] * self._fft_n
+        for i in range(self._fft_n):
+            r = 0
+            for b in range(8):
+                if (i >> b) & 1:
+                    r |= (1 << (7 - b))
+            self._rev[i] = r
+
+        self._twiddle_cos = [math.cos(-2.0 * math.pi * k / self._fft_n) for k in range(self._fft_n // 2)]
+        self._twiddle_sin = [math.sin(-2.0 * math.pi * k / self._fft_n) for k in range(self._fft_n // 2)]
+        self._hann = [0.5 * (1.0 - math.cos(2.0 * math.pi * n / (self._fft_n - 1))) for n in range(self._fft_n)]
+
+        # Precompute 40 log band indices across 128 bins (bins 1..127, skipping DC)
+        self._log_indices = [int(round(math.pow(127, i / self.num_bars))) for i in range(self.num_bars + 1)]
+        self._log_indices[0] = 1
+
     def feed_pcm(self, pcm_bytes: bytes):
         """Processes raw 16-bit PCM mono 22050Hz chunk and computes balanced 40-band spectrum"""
         if not pcm_bytes or len(pcm_bytes) < 256:
@@ -364,34 +382,51 @@ class IntegratedVisualizer:
             except Exception:
                 pass
 
-        # Zero-dependency Fallback (struct) when numpy is missing
+        # Zero-dependency Fast Cooley-Tukey Radix-2 FFT (exact mathematical parity with np.fft.rfft)
         try:
+            n = self._fft_n
             sample_count = len(pcm_bytes) // 2
-            samples = struct.unpack(f"<{sample_count}h", pcm_bytes[:sample_count * 2])
-            if not samples:
+            if sample_count < n:
                 return
+            raw = struct.unpack(f"<{n}h", pcm_bytes[:n*2])
 
-            total_abs = sum(abs(s) for s in samples)
-            avg_amp = total_abs / float(sample_count)
-            if avg_amp < 10.0:
-                return
+            # Apply Hann window & bit reversal permutation
+            re = [raw[self._rev[i]] * self._hann[self._rev[i]] for i in range(n)]
+            im = [0.0] * n
 
-            step = max(1, sample_count // self.num_bars)
+            length = 2
+            while length <= n:
+                half = length // 2
+                step = n // length
+                for i in range(0, n, length):
+                    for k in range(half):
+                        t_idx = k * step
+                        c = self._twiddle_cos[t_idx]
+                        s = self._twiddle_sin[t_idx]
+                        tr = re[i + k + half] * c - im[i + k + half] * s
+                        ti = re[i + k + half] * s + im[i + k + half] * c
+                        re[i + k + half] = re[i + k] - tr
+                        im[i + k + half] = im[i + k] - ti
+                        re[i + k] += tr
+                        im[i + k] += ti
+                length *= 2
+
+            # Magnitudes of first n//2 positive frequency bins
+            mags = [math.sqrt(re[k]*re[k] + im[k]*im[k]) for k in range(n // 2)]
+
             raw_bands = []
             for i in range(self.num_bars):
-                chunk = samples[i * step : (i + 1) * step]
-                if chunk:
-                    chunk_amp = sum(abs(s) for s in chunk) / float(len(chunk))
-                    tilt = 1.0 + (i / float(self.num_bars)) * 2.0
-                    raw_bands.append(chunk_amp * tilt)
-                else:
-                    raw_bands.append(avg_amp)
+                start = self._log_indices[i]
+                end = max(start + 1, self._log_indices[i+1])
+                tilt = 1.0 + (i / float(self.num_bars)) * 3.5
+                raw_val = (sum(mags[start:end]) / float(end - start)) * tilt
+                raw_bands.append(raw_val)
 
             max_in_frame = max(raw_bands) if raw_bands else 1.0
             if max_in_frame > self.peak_energy:
                 self.peak_energy = self.peak_energy * 0.75 + max_in_frame * 0.25
             else:
-                self.peak_energy = max(1000.0, self.peak_energy * 0.965 + max_in_frame * 0.035)
+                self.peak_energy = max(2000.0, self.peak_energy * 0.965 + max_in_frame * 0.035)
 
             bands = []
             for raw_val in raw_bands:
@@ -419,54 +454,10 @@ class IntegratedVisualizer:
                     self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 26.0)
                 else:
                     self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 11.0)
-        elif is_active:
-            # 2. Dynamic Procedural Rhythmic Spectrum (when playing via mpv/native sink without PCM tap)
-            self._update_procedural(now, dt)
         else:
-            # 3. Idle gentle decay to baseline (14.0 px)
+            # 2. Idle gentle decay to baseline (14.0 px)
             for i in range(self.num_bars):
                 self.heights[i] += (14.0 - self.heights[i]) * min(1.0, dt * 6.0)
-
-    def _update_procedural(self, now: float, dt: float):
-        # Base tempo: ~124 BPM (2.066 Hz)
-        tempo = 2.066
-        phase = now * tempo * 2.0 * math.pi
-        
-        # Beat pulses: primary kick on beat, snare on offbeat
-        beat_kick = max(0.0, math.sin(phase)) ** 3.0
-        beat_snare = max(0.0, math.sin(phase + math.pi * 0.5)) ** 4.0
-        
-        for i in range(self.num_bars):
-            norm_i = i / float(self.num_bars)
-            
-            # Bass wave (bars 0-10)
-            if norm_i < 0.25:
-                # Strong punch on beat_kick + low bass oscillation
-                wave = beat_kick * 0.85 + 0.15 * math.sin(now * 3.7 + i * 0.4)
-                target = 25.0 + 175.0 * max(0.0, wave)
-            # Low-mid wave (bars 10-20)
-            elif norm_i < 0.50:
-                wave = beat_snare * 0.65 + 0.35 * math.sin(now * 5.2 + i * 0.3)
-                target = 20.0 + 150.0 * max(0.0, wave)
-            # High-mid wave (bars 20-30)
-            elif norm_i < 0.75:
-                wave = 0.5 * math.sin(now * 7.1 + i * 0.5) + 0.3 * math.cos(now * 4.3 - i * 0.2) + 0.2 * beat_kick
-                target = 18.0 + 130.0 * max(0.0, wave)
-            # Treble wave (bars 30-39)
-            else:
-                # Fast hi-hat / cymbal shimmer
-                wave = 0.45 * math.sin(now * 11.3 + i * 0.7) + 0.35 * math.sin(now * 17.1 + i * 0.9) + 0.2 * beat_snare
-                target = 16.0 + 110.0 * max(0.0, wave)
-            
-            # Subtle pseudo-random micro-jitter based on bar index & time
-            jitter = (math.sin(now * 19.7 + i * 13.3) * 0.5 + 0.5) * 15.0
-            target = max(14.0, min(210.0, target + jitter))
-            
-            # Responsive attack / decay
-            if target > self.heights[i]:
-                self.heights[i] += (target - self.heights[i]) * min(1.0, dt * 22.0)
-            else:
-                self.heights[i] += (target - self.heights[i]) * min(1.0, dt * 10.0)
 
 
     def draw(self, surface: pygame.Surface, x: int, y: int, width: int, max_h: int = 220):
@@ -794,6 +785,7 @@ class SNfetchDashboard:
         self.playback_start_time = 0.0
         self.track_duration = 210.0
         self.audio_proc: Optional[subprocess.Popen] = None
+        self.audio_tap_proc: Optional[subprocess.Popen] = None
 
         self.is_resolving = False
         self.resolve_target_idx = -1
@@ -1765,28 +1757,51 @@ class SNfetchDashboard:
             self._resolve_id += 1
             proc = self.audio_proc
             self.audio_proc = None
+            tap = self.audio_tap_proc
+            self.audio_tap_proc = None
             self.is_playing = False
             self.is_station_drop = False
-            if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=0.3)
-                except Exception:
+            for p in (proc, tap):
+                if p and p.poll() is None:
                     try:
-                        proc.kill()
+                        p.terminate()
+                        p.wait(timeout=0.2)
                     except Exception:
-                        pass
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
 
-    def _audio_spectrum_reader(self, proc: subprocess.Popen):
+    def _start_audio_reader(self):
+        if self.audio_proc and self.audio_proc.stdout:
+            threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc, False), daemon=True).start()
+        elif shutil.which("parec"):
+            env = dict(os.environ)
+            if "XDG_RUNTIME_DIR" not in env or not os.path.exists(env["XDG_RUNTIME_DIR"]):
+                if os.path.exists("/var/run/0-runtime-dir"):
+                    env["XDG_RUNTIME_DIR"] = "/var/run/0-runtime-dir"
+            try:
+                self.audio_tap_proc = subprocess.Popen(
+                    ["parec", "--rate=22050", "--format=s16le", "--channels=1"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=env
+                )
+                threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_tap_proc, True), daemon=True).start()
+            except Exception as e:
+                logging.warning(f"Could not start parec audio tap: {e}")
+
+    def _audio_spectrum_reader(self, proc: subprocess.Popen, is_tap: bool = False):
         if not proc or not proc.stdout:
             return
-        chunk_size = 2048  # 1024 16-bit mono samples (~46ms @ 22.05kHz)
-        chunk_duration = 1024.0 / 22050.0
+        chunk_size = 512 if is_tap else 1024  # 256 samples (~11.6ms) for tap, 512 samples (~23ms) for pipe
+        chunk_duration = (chunk_size // 2) / 22050.0
         
-        # Audio DAC hardware / ring buffer delay compensation (sound takes ~0.35s to physical output)
-        time.sleep(0.35)
+        # Audio DAC hardware / ring buffer delay compensation only when reading ahead from ffmpeg
+        if not is_tap:
+            time.sleep(0.35)
+            next_chunk_time = time.time()
         
-        next_chunk_time = time.time()
         try:
             while proc and proc.poll() is None and self.is_playing:
                 data = proc.stdout.read(chunk_size)
@@ -1794,16 +1809,22 @@ class SNfetchDashboard:
                     break
                 self.visualizer.feed_pcm(data)
                 
-                # Pace the reader so it stays locked to real-time audio playback
-                next_chunk_time += chunk_duration
-                sleep_time = next_chunk_time - time.time()
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                elif sleep_time < -0.15:
-                    # If behind by more than 150ms, re-anchor
-                    next_chunk_time = time.time()
+                # Pace the reader only if not a blocking hardware tap (pipe needs pacing, tap blocks naturally)
+                if not is_tap:
+                    next_chunk_time += chunk_duration
+                    sleep_time = next_chunk_time - time.time()
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                    elif sleep_time < -0.15:
+                        next_chunk_time = time.time()
         except Exception:
             pass
+        finally:
+            if is_tap and proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
 
     def trigger_play_track_async(self, idx: int):
         with self._audio_lock:
@@ -1855,8 +1876,7 @@ class SNfetchDashboard:
                         self.is_playing = True
                     self.playback_start_time = time.time()
                     self.track_duration = 12.0
-                    if stdout_mode == subprocess.PIPE:
-                        threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc,), daemon=True).start()
+                    self._start_audio_reader()
                     
                     proc = self.audio_proc
                     if proc:
@@ -1865,6 +1885,12 @@ class SNfetchDashboard:
                             time.sleep(0.6)  # Allow soundcard buffer to naturally drain
                         except Exception:
                             pass
+                    if self.audio_tap_proc and self.audio_tap_proc.poll() is None:
+                        try:
+                            self.audio_tap_proc.terminate()
+                        except Exception:
+                            pass
+                        self.audio_tap_proc = None
                     self.is_station_drop = False
 
             if self.state != STATE_RADIO or self._resolve_id != req_id:
@@ -1941,8 +1967,7 @@ class SNfetchDashboard:
                     self.track_duration = float(duration) if duration and float(duration) > 0 else 210.0
                 except (ValueError, TypeError):
                     self.track_duration = 210.0
-                if stdout_mode == subprocess.PIPE:
-                    threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc,), daemon=True).start()
+                self._start_audio_reader()
         except Exception as e:
             print(f"Playback error: {e}")
         finally:
