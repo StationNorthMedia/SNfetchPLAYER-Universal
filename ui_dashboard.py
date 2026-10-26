@@ -1173,10 +1173,11 @@ class SNfetchDashboard:
         """
         Pre-renders 36 upper-half frames of the retro rotating vinyl record for Radio Mode.
         - Radius: 340px (fills ~92% of Card 1's height).
-        - Anisotropic sheen fixed at 2 o'clock (325°) and 8 o'clock (145°) over the low-treble spectrum.
-        - 19 fine concentric micro-grooves with cyan outer rim.
-        - Center Label (Nord8 cyan) with Station North branding, concentric tracks, and spindle hole.
-        - Takes ~85ms at startup and guarantees zero runtime CPU impact (0.15ms per frame blit).
+        - Natural Gliding Sheen: Anchored around 2 o'clock (325°) and 8 o'clock (145°).
+          Features an authentic gentle 'boat-like' physical sway (+/- 8°) and undulating groove
+          ripples running through with the rotation, creating living light reflections on the vinyl.
+        - Center Label: Nord8 cyan with Station North branding, chrome spindle pin, rotating 33 RPM.
+        - Zero runtime overhead: 36 pre-rendered frames blit in 0.15ms on R36S handheld.
         """
         try:
             radius = 340
@@ -1184,23 +1185,7 @@ class SNfetchDashboard:
             cx, cy = radius, radius
             label_r = int(radius * 0.35)
 
-            # 1. Silky Smooth Anisotropic Sheen Surface (starting at 2 o'clock / 325° and 8 o'clock / 145°)
-            sheen_surf = pygame.Surface((full_size, full_size), pygame.SRCALPHA)
-            for angle_center in (325, 145):
-                for deg_10 in range(-280, 281, 2):  # -28° to +28° in 0.2° steps (ultra smooth, no discrete stripes)
-                    deg = deg_10 / 10.0
-                    fact = math.cos(math.radians(deg / 28.0 * 90.0)) ** 1.8
-                    alpha = int(38 * fact)
-                    if alpha <= 0:
-                        continue
-                    rad = math.radians(angle_center + deg)
-                    sx = cx + math.cos(rad) * (label_r + 2)
-                    sy = cy + math.sin(rad) * (label_r + 2)
-                    ex = cx + math.cos(rad) * (radius - 3)
-                    ey = cy + math.sin(rad) * (radius - 3)
-                    pygame.draw.line(sheen_surf, (210, 235, 255, alpha), (sx, sy), (ex, ey), 3)
-
-            # 2. Base Disc Surface that rotates
+            # 1. Base Vinyl Disc with concentric grooves and song tracks
             base_disc = pygame.Surface((full_size, full_size), pygame.SRCALPHA)
             pygame.draw.circle(base_disc, (18, 22, 28), (cx, cy), radius)
             pygame.draw.circle(base_disc, (28, 35, 46), (cx, cy), radius, width=4)
@@ -1213,17 +1198,19 @@ class SNfetchDashboard:
                 col = (42, 52, 68) if w_line == 2 else (28, 36, 48)
                 pygame.draw.circle(base_disc, col, (cx, cy), r_val, width=w_line)
 
-            # Center Label
-            pygame.draw.circle(base_disc, NORD8, (cx, cy), label_r)
-            pygame.draw.circle(base_disc, (100, 155, 175), (cx, cy), label_r, width=3)
-            pygame.draw.circle(base_disc, (60, 85, 100), (cx, cy), int(label_r * 0.88), width=1)
-            pygame.draw.circle(base_disc, (70, 95, 110), (cx, cy), int(label_r * 0.60), width=1)
+            # 2. Rotating Center Label
+            raw_label = pygame.Surface((label_r * 2, label_r * 2), pygame.SRCALPHA)
+            lcx, lcy = label_r, label_r
+            pygame.draw.circle(raw_label, NORD8, (lcx, lcy), label_r)
+            pygame.draw.circle(raw_label, (100, 155, 175), (lcx, lcy), label_r, width=3)
+            pygame.draw.circle(raw_label, (60, 85, 100), (lcx, lcy), int(label_r * 0.88), width=1)
+            pygame.draw.circle(raw_label, (70, 95, 110), (lcx, lcy), int(label_r * 0.60), width=1)
 
             font_label = self._load_font(20, bold=True)
             txt1 = font_label.render("STATION NORTH", True, (46, 52, 64))
-            base_disc.blit(txt1, (cx - txt1.get_width() // 2, cy - 44))
+            raw_label.blit(txt1, (lcx - txt1.get_width() // 2, lcy - 44))
             txt2 = font_label.render("RADIO 33 RPM", True, (67, 76, 94))
-            base_disc.blit(txt2, (cx - txt2.get_width() // 2, cy + 24))
+            raw_label.blit(txt2, (lcx - txt2.get_width() // 2, lcy + 24))
 
             # Logo in center of label if available
             if self.logo_large:
@@ -1231,23 +1218,51 @@ class SNfetchDashboard:
                     lw = int(label_r * 0.90)
                     lh = int(lw * (self.logo_large.get_height() / self.logo_large.get_width()))
                     scaled_logo = pygame.transform.smoothscale(self.logo_large, (lw, lh))
-                    base_disc.blit(scaled_logo, scaled_logo.get_rect(center=(cx, cy)))
+                    raw_label.blit(scaled_logo, scaled_logo.get_rect(center=(lcx, lcy)))
                 except Exception:
                     pass
 
-            pygame.draw.circle(base_disc, (16, 20, 26), (cx, cy), 13)
-            pygame.draw.circle(base_disc, NORD4, (cx, cy), 13, width=2)
+            # Metallic Spindle Pin with Chrome Specular Highlight Dot
+            pygame.draw.circle(raw_label, (16, 20, 26), (lcx, lcy), 13)
+            pygame.draw.circle(raw_label, NORD4, (lcx, lcy), 13, width=2)
+            pygame.draw.circle(raw_label, (255, 255, 255), (lcx - 3, lcy - 3), 3)
 
-            # Bake the luminous sheen onto the disc so it rotates with the vinyl!
-            base_disc.blit(sheen_surf, (0, 0), special_flags=pygame.BLEND_ADD)
-
-            # 3. Pre-render 36 upper-half frames (10° per frame)
+            # 3. Pre-render 36 frames with living light glide & rotating label
             self._vinyl_frames = []
             for deg in range(0, 360, 10):
-                rot_disc = pygame.transform.rotate(base_disc, -deg)
+                rad_t = math.radians(deg)
+                # Physical gentle boat-like sway (+/- 8 degrees around 2 o'clock)
+                wobble_angle = math.sin(rad_t) * 8.0
+                wobble_intensity = 0.88 + 0.12 * math.cos(rad_t * 2.0)
+
+                # Generate sheen for this frame
+                sheen_surf = pygame.Surface((full_size, full_size), pygame.SRCALPHA)
+                for center_base in (325, 145):
+                    center = center_base + wobble_angle
+                    for offset_10 in range(-450, 451, 3):
+                        d = offset_10 / 10.0
+                        gauss = math.exp(-0.5 * (d / 14.0) ** 2)
+                        wave = 0.75 + 0.25 * math.sin(d * 0.4 + rad_t * 3.0)
+                        alpha = int(32 * gauss * wave * wobble_intensity)
+                        if alpha <= 0:
+                            continue
+                        rad_ray = math.radians(center + d)
+                        sx = cx + math.cos(rad_ray) * (label_r + 2)
+                        sy = cy + math.sin(rad_ray) * (label_r + 2)
+                        ex = cx + math.cos(rad_ray) * (radius - 3)
+                        ey = cy + math.sin(rad_ray) * (radius - 3)
+                        pygame.draw.line(sheen_surf, (215, 235, 255, alpha), (sx, sy), (ex, ey), 3)
+
+                # Composite upper half frame
                 frame = pygame.Surface((full_size, radius), pygame.SRCALPHA)
-                r_rect = rot_disc.get_rect(center=(cx, radius))
-                frame.blit(rot_disc, r_rect.topleft)
+                frame.blit(base_disc, (0, 0), area=pygame.Rect(0, 0, full_size, radius))
+                frame.blit(sheen_surf, (0, 0), area=pygame.Rect(0, 0, full_size, radius), special_flags=pygame.BLEND_ADD)
+
+                # Rotate label and blit at (cx, radius)
+                rot_label = pygame.transform.rotate(raw_label, -deg)
+                l_rect = rot_label.get_rect(center=(cx, radius))
+                frame.blit(rot_label, l_rect.topleft)
+
                 self._vinyl_frames.append(frame)
         except Exception as e:
             logging.error(f"Failed to init radio vinyl record: {e}")
