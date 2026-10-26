@@ -265,31 +265,66 @@ class ShuffleQueueManager:
 class HardwareManager:
     @staticmethod
     def get_battery_info() -> Tuple[int, bool]:
-        cap_file = Path("/sys/class/power_supply/battery/capacity")
-        stat_file = Path("/sys/class/power_supply/battery/status")
-        capacity = 85
-        is_charging = False
-        if cap_file.exists():
-            try:
-                capacity = int(cap_file.read_text().strip())
-            except Exception:
-                pass
-        if stat_file.exists():
-            try:
-                is_charging = "charging" in stat_file.read_text().strip().lower()
-            except Exception:
-                pass
-        return capacity, is_charging
+        ps_dir = Path("/sys/class/power_supply")
+        if ps_dir.exists():
+            candidates = list(ps_dir.glob("*"))
+            bat_nodes = []
+            for node in candidates:
+                type_file = node / "type"
+                if type_file.exists() and "battery" in type_file.read_text().strip().lower():
+                    bat_nodes.append(node)
+                elif "bat" in node.name.lower():
+                    bat_nodes.append(node)
+
+            # Prioritize main system battery (rk817, axp, BAT0, battery) over peripheral
+            bat_nodes.sort(key=lambda n: 0 if any(k in n.name.lower() for k in ["rk817", "axp", "bat0", "battery"]) else 1)
+
+            for b in bat_nodes:
+                cap_file = b / "capacity"
+                stat_file = b / "status"
+                if cap_file.exists():
+                    try:
+                        cap = int(cap_file.read_text().strip())
+                        is_chg = False
+                        if stat_file.exists():
+                            st = stat_file.read_text().strip().lower()
+                            is_chg = "charging" in st or "full" in st
+                        return max(0, min(100, cap)), is_chg
+                    except Exception:
+                        pass
+
+            # If no battery found, check if mains AC power is online (desktop PC)
+            for m in ps_dir.glob("*"):
+                type_f = m / "type"
+                online_f = m / "online"
+                if type_f.exists() and "mains" in type_f.read_text().strip().lower():
+                    if online_f.exists() and online_f.read_text().strip() == "1":
+                        return 100, True
+
+        return 100, True
 
     @staticmethod
     def get_wifi_status() -> bool:
-        wlan_file = Path("/sys/class/net/wlan0/operstate")
-        if wlan_file.exists():
-            try:
-                return "up" in wlan_file.read_text().strip().lower()
-            except Exception:
-                pass
-        return True
+        net_dir = Path("/sys/class/net")
+        if net_dir.exists():
+            for iface in net_dir.glob("*"):
+                is_wifi = iface.name.startswith(("wl", "ra", "wlan")) or (iface / "wireless").exists()
+                if is_wifi:
+                    op = iface / "operstate"
+                    carrier = iface / "carrier"
+                    if op.exists():
+                        try:
+                            if "up" in op.read_text().strip().lower():
+                                return True
+                        except Exception:
+                            pass
+                    if carrier.exists():
+                        try:
+                            if carrier.read_text().strip() == "1":
+                                return True
+                        except Exception:
+                            pass
+        return False
 
     @staticmethod
     def get_time_str() -> str:
@@ -2619,6 +2654,7 @@ class SNfetchDashboard:
                 break
 
         if target_path:
+            self.stop_audio()
             self.stop_chronicles_audio()
             try:
                 if pygame.mixer.get_init():
@@ -3691,7 +3727,7 @@ class SNfetchDashboard:
         pygame.draw.rect(self.screen, NORD1, abox_rect, border_radius=12)
         pygame.draw.rect(self.screen, NORD8 if self.chronicles_playing else NORD2, abox_rect, width=2 if self.chronicles_playing else 1, border_radius=12)
 
-        astat_text = "❚❚ NARRATION PLAYING" if self.chronicles_playing else "▶ READ ALOUD [A] / [Start]"
+        astat_text = "❚❚ NARRATION PLAYING" if self.chronicles_playing else "▶ READ ALOUD [A / X / Click]"
         astat_col = NORD14 if self.chronicles_playing else NORD8
         astat_s = self._load_font(20, bold=True).render(astat_text, True, astat_col)
         self.screen.blit(astat_s, (col1_x + 20, abox_y + 18))
@@ -3736,8 +3772,8 @@ class SNfetchDashboard:
 
         chronicles_pills = [
             ("◄/►", "Browse Panels", NORD8),
-            ("A", "Read Aloud", NORD14),
-            ("B", "Main Menu", NORD11)
+            ("A / X", "Read Aloud", NORD14),
+            ("B / O", "Main Menu", NORD11)
         ]
         self.draw_bottom_bar(pills=chronicles_pills, right_text="Station North • Chronicles")
 
@@ -4299,6 +4335,60 @@ class SNfetchDashboard:
 
         return True
 
+    def _handle_mouse_click(self, mx: int, my: int):
+        now = time.time()
+        if self.state == STATE_SPLASH:
+            if self.intro_active:
+                self.intro_active = False
+                self.intro_transitioning = False
+                self._state_transition_time = now
+                return
+
+            card_w = 230
+            card_h = 320
+            gap = 20
+            right_col_w = 160
+            right_card_h = (card_h - gap) // 2
+            total_w = 3 * card_w + right_col_w + 3 * gap
+            start_x = (SCREEN_WIDTH - total_w) // 2
+            card_y = 388
+
+            target_rects = [
+                pygame.Rect(start_x + 0 * (card_w + gap), card_y, card_w, card_h),
+                pygame.Rect(start_x + 1 * (card_w + gap), card_y, card_w, card_h),
+                pygame.Rect(start_x + 2 * (card_w + gap), card_y, card_w, card_h),
+                pygame.Rect(start_x + 3 * (card_w + gap), card_y, right_col_w, right_card_h),
+                pygame.Rect(start_x + 3 * (card_w + gap), card_y + right_card_h + gap, right_col_w, right_card_h),
+            ]
+            for i, r in enumerate(target_rects):
+                if r.collidepoint(mx, my):
+                    self.splash_cursor = i
+                    self._handle_action_key(pygame.K_RETURN)
+                    return
+
+        elif self.state == STATE_CHRONICLES:
+            if my > 700 and mx < 220:
+                self._handle_action_key(pygame.K_ESCAPE)
+                return
+            col1_x = 40
+            col1_w = 440
+            panel_y = 66
+            panel_h = 504
+            if mx < col1_x + 120 and (panel_y + panel_h - 50 < my < panel_y + panel_h):
+                self._handle_action_key(pygame.K_LEFT)
+                return
+            if mx > col1_x + col1_w - 120 and (panel_y + panel_h - 50 < my < panel_y + panel_h):
+                self._handle_action_key(pygame.K_RIGHT)
+                return
+            if col1_x <= mx <= col1_x + col1_w and panel_y <= my <= panel_y + panel_h + 140:
+                self.toggle_chronicles_audio()
+                return
+
+        elif self.state in (STATE_RADIO, STATE_TV, STATE_SETTINGS):
+            if my > 700 and mx < 220:
+                self._handle_action_key(pygame.K_ESCAPE)
+                return
+
     # =========================================================================
     # EVENT LOOP & EXECUTION
     # =========================================================================
@@ -4334,37 +4424,48 @@ class SNfetchDashboard:
                 pygame.quit()
                 sys.exit(0)
 
-
-
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
+
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 1:
+                        self._handle_mouse_click(event.pos[0], event.pos[1])
 
                 elif event.type == pygame.KEYDOWN:
                     if not self._handle_action_key(event.key):
                         running = False
 
                 elif event.type == pygame.JOYBUTTONDOWN:
-                    # PS4 / Xbox gamepad mappings
                     b = event.button
-                    if b in (0, 9):  # Cross / A / Options / Start
-                        if not self._handle_action_key(pygame.K_RETURN):
-                            running = False
-                    elif b == 1:     # Circle / B
-                        if not self._handle_action_key(pygame.K_ESCAPE):
-                            running = False
-                    elif b == 2:     # Square / X
-                        self._handle_action_key(pygame.K_SPACE)
-                    elif b in (3, 8): # Triangle / Y / Share / Select
-                        self._handle_action_key(pygame.K_TAB)
-                    elif b in (4, 13): # L1 / D-Pad Left
-                        self._handle_action_key(pygame.K_LEFT)
-                    elif b in (5, 14): # R1 / D-Pad Right
-                        self._handle_action_key(pygame.K_RIGHT)
-                    elif b == 11:    # D-Pad Up
-                        self._handle_action_key(pygame.K_UP)
-                    elif b == 12:    # D-Pad Down
-                        self._handle_action_key(pygame.K_DOWN)
+                    if self.state == STATE_CHRONICLES:
+                        if b == 1:  # Circle / B -> Back
+                            self._handle_action_key(pygame.K_ESCAPE)
+                        elif b in (4, 13):  # L1 / Left
+                            self._handle_action_key(pygame.K_LEFT)
+                        elif b in (5, 14):  # R1 / Right
+                            self._handle_action_key(pygame.K_RIGHT)
+                        else:  # Cross (0), Square (3), Triangle (2), Options (9), etc. -> Read Aloud!
+                            self.toggle_chronicles_audio()
+                    else:
+                        if b in (0, 9):  # Cross / Options / Start
+                            if not self._handle_action_key(pygame.K_RETURN):
+                                running = False
+                        elif b == 1:     # Circle / B
+                            if not self._handle_action_key(pygame.K_ESCAPE):
+                                running = False
+                        elif b in (2, 3): # Square / Triangle / X
+                            self._handle_action_key(pygame.K_SPACE)
+                        elif b in (8,):   # Share / Select
+                            self._handle_action_key(pygame.K_TAB)
+                        elif b in (4, 13): # L1 / D-Pad Left
+                            self._handle_action_key(pygame.K_LEFT)
+                        elif b in (5, 14): # R1 / D-Pad Right
+                            self._handle_action_key(pygame.K_RIGHT)
+                        elif b == 11:    # D-Pad Up
+                            self._handle_action_key(pygame.K_UP)
+                        elif b == 12:    # D-Pad Down
+                            self._handle_action_key(pygame.K_DOWN)
 
                 elif event.type == pygame.JOYHATMOTION:
                     hx, hy = event.value
