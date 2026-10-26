@@ -2617,11 +2617,6 @@ class SNfetchDashboard:
             proc = self.chronicles_proc
             self.chronicles_proc = None
             self.chronicles_playing = False
-            try:
-                if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
-                    pygame.mixer.music.stop()
-            except Exception:
-                pass
             if proc and proc.poll() is None:
                 try:
                     proc.terminate()
@@ -2657,18 +2652,16 @@ class SNfetchDashboard:
             self.stop_audio()
             self.stop_chronicles_audio()
             try:
-                if pygame.mixer.get_init():
-                    pygame.mixer.music.load(str(target_path))
-                    pygame.mixer.music.play()
-                    self.chronicles_playing = True
-                elif shutil.which("mpv"):
+                if shutil.which("mpv"):
                     cmd = ["mpv", "--no-video", "--really-quiet", "--no-terminal", str(target_path)]
                     self.chronicles_proc = subprocess.Popen(cmd)
                     self.chronicles_playing = True
+                    logging.info(f"Chronicles playback started with mpv: {target_path.name}")
                 elif shutil.which("ffplay"):
                     cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", str(target_path)]
                     self.chronicles_proc = subprocess.Popen(cmd)
                     self.chronicles_playing = True
+                    logging.info(f"Chronicles playback started with ffplay: {target_path.name}")
             except Exception as sub_err:
                 logging.error(f"Narration playback error: {sub_err}")
         else:
