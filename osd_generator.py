@@ -37,14 +37,10 @@ def generate_osd_ass(
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        # 0. Top Header
-        f"Style: TopHeaderStyle, DejaVu Sans, 14, {COLOR_NORD8_CYAN}, &H00000000, &H00000000, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 3, 1, 7, 36, 10, 24, 1",
-        # 1. Status Badge (oben in der Karte)
-        f"Style: BadgeStyle, DejaVu Sans, 14, {COLOR_NORD14_GREEN if not is_repeat else COLOR_NORD13_GOLD}, &H00000000, &H00000000, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 3, 1, 1, 36, 10, 96, 1",
-        # 2. Titel: Große, fette Schrift (26pt)
-        f"Style: TitleStyle, DejaVu Sans, 26, {COLOR_NORD6_SNOW}, &H00000000, {COLOR_NORD2_BORDER}, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 5, 2, 1, 36, 10, 62, 1",
-        # 3. Artist: Schöne Schrift (19pt)
-        f"Style: ArtistStyle, DejaVu Sans, 19, {COLOR_NORD8_CYAN}, &H00000000, {COLOR_NORD2_BORDER}, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 4, 2, 1, 36, 10, 32, 1",
+        # 1. Lower Third Artist (oben rechts in der Ecke, 18pt Snow White)
+        f"Style: ArtistStyle, DejaVu Sans, 18, {COLOR_NORD6_SNOW}, &H00000000, {COLOR_NORD2_BORDER}, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 4, 1, 9, 10, 30, 24, 1",
+        # 2. Lower Third Titel + Broadcast (oben rechts unter Artist, 14pt Cyan)
+        f"Style: TitleStyle, DejaVu Sans, 14, {COLOR_NORD8_CYAN}, &H00000000, {COLOR_NORD2_BORDER}, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 3, 1, 9, 10, 30, 52, 1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
@@ -53,13 +49,11 @@ def generate_osd_ass(
     if show_osd and track:
         title = track.get("title", "Unknown Title").replace("{", "(").replace("}", ")")
         artist = track.get("artist", "Unknown Artist").replace("{", "(").replace("}", ")")
-        badge = "🔂 REPEAT LOOP ACTIVE • STATION NORTH TV" if is_repeat else "▶ NOW PLAYING • STATION NORTH TV"
+        suffix = " • Television Broadcast [REPEAT]" if is_repeat else " • Television Broadcast"
 
-        # Blendet nach 0.2s weich ein und nach 4.8s weich aus
-        ass_lines.append(f"Dialogue: 1,0:00:00.20,0:00:04.80,TopHeaderStyle,,0,0,0,,{{\\fad(250,500)}}  STATION NORTH TV • THE QUEEN'S FREQUENCY  ")
-        ass_lines.append(f"Dialogue: 1,0:00:00.20,0:00:04.80,BadgeStyle,,0,0,0,,{{\\fad(250,500)}}  {badge}  ")
-        ass_lines.append(f"Dialogue: 1,0:00:00.20,0:00:04.80,TitleStyle,,0,0,0,,{{\\fad(250,500)}}  {title}  ")
-        ass_lines.append(f"Dialogue: 1,0:00:00.20,0:00:04.80,ArtistStyle,,0,0,0,,{{\\fad(250,500)}}  {artist}  ")
+        # Blendet nach 0.2s weich ein und nach 6.0s weich aus (oben rechts)
+        ass_lines.append(f"Dialogue: 1,0:00:00.20,0:00:06.00,ArtistStyle,,0,0,0,,{{\\fad(250,500)}}  {artist}  ")
+        ass_lines.append(f"Dialogue: 1,0:00:00.20,0:00:06.00,TitleStyle,,0,0,0,,{{\\fad(250,500)}}  {title}{suffix}  ")
 
     content = "\n".join(ass_lines) + "\n"
     with open(output_path, "w", encoding="utf-8") as f:

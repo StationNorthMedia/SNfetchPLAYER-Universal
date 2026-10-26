@@ -113,8 +113,8 @@ class MpvGLWidget(QOpenGLWidget):
         vw = self.width()
         vh = self.height()
         if not self.master_logo.isNull():
-            # Dynamically scale logo proportional to window height (~6.5% of height)
-            logo_h = max(34, int(vh * 0.065))
+            # Dynamically scale logo proportional to window height (~13% of height - doubled)
+            logo_h = max(68, int(vh * 0.13))
             logo_w = int(logo_h * (self.master_logo.width() / self.master_logo.height()))
             scaled = self.master_logo.scaled(
                 logo_w, logo_h,
@@ -123,11 +123,11 @@ class MpvGLWidget(QOpenGLWidget):
             )
             self.watermark.setPixmap(scaled)
             self.watermark.setFixedSize(scaled.size())
-            margin_x = max(16, int(vw * 0.025))
-            margin_y = max(16, int(vh * 0.035))
+            margin_x = max(20, int(vw * 0.03))
+            margin_y = max(20, int(vh * 0.035))
             self.watermark.move(vw - scaled.width() - margin_x, vh - scaled.height() - margin_y)
         else:
-            self.watermark.move(vw - 50, vh - 40)
+            self.watermark.move(vw - 80, vh - 60)
         self.watermark.raise_()
 
     def closeEvent(self, event):
@@ -369,11 +369,11 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
         self.cockpit.setGeometry(x, y, w, h)
         self.cockpit.raise_()
 
-        # 2. Reposition Lower Third (Bottom Left, elevated above cockpit line)
+        # 2. Reposition Lower Third (Top Right Corner)
         lt_w = min(420, max(280, int(vw * 0.38)))
         lt_h = 58
-        lt_x = max(24, int(vw * 0.03))
-        lt_y = vh - h - 22 - lt_h - 14
+        lt_x = vw - lt_w - max(24, int(vw * 0.03))
+        lt_y = max(24, int(vh * 0.035))
         self.lower_third.setGeometry(lt_x, lt_y, lt_w, lt_h)
         self.lower_third.raise_()
 

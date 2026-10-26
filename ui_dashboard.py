@@ -2824,6 +2824,7 @@ class SNfetchDashboard:
                 elif self.direct_video_player:
                     self.direct_video_player.play(stream_url)
                 self.is_tv_playing = True
+                self.tv_track_start_time = time.time()
                 self._trigger_prefetch_next_track(idx, is_tv=True)
         except Exception as e:
             logging.error(f"TV Playback error: {e}")
@@ -4656,12 +4657,24 @@ class SNfetchDashboard:
         b_tag = self._render_cached_text(stat_str, 18, bold=True, color=stat_col)
         self.screen.blit(b_tag, (vm_x + 24, vm_y + 24))
 
-        # English Handheld & Demo Architecture Specification
-        line1 = self._render_cached_text("STATION NORTH • PC SUITE EMULATION", 20, bold=True, color=NORD6)
-        line2 = self._render_cached_text("Companion Video Engine: PyQt6 + libmpv OpenGL Pipeline", 14, bold=True, color=NORD8)
-        line3 = self._render_cached_text("Target Hardware: dArkOS / RK3326 Handheld (Mali-G31 DRM)", 13, bold=False, color=NORD4)
-        line4 = self._render_cached_text("On Handhelds, video renders zero-latency direct to KMS/DRM framebuffer.", 12, bold=False, color=NORD4)
-        line5 = self._render_cached_text("On PC, broadcast is projected into the dedicated GPU companion window.", 12, bold=False, color=NORD4)
+        # Handheld vs PC Architecture & Controls Specification
+        if self.platform.is_handheld:
+            line1 = self._render_cached_text("STATION NORTH • TV BROADCAST", 20, bold=True, color=NORD6)
+            line2 = self._render_cached_text("Hardware DRM Video Pipeline (Mali-G31 Direct)", 14, bold=True, color=NORD8)
+            line3 = self._render_cached_text("● [A] Taste  : Vollbild-Wiedergabe starten", 14, bold=True, color=NORD14)
+            line4 = self._render_cached_text("● D-Pad ◄/►  : Sender & Video vor / zurück", 13, bold=False, color=NORD4)
+            line5 = self._render_cached_text("● [B] Taste  : Zurück zum Hauptmenü (Deck)", 13, bold=False, color=NORD4)
+            hint_str = "[A] VOLLBILD STARTEN • [B] HAUPTMENÜ"
+            fs_hint_str = "[A] VOLLBILD • [B] MENÜ"
+        else:
+            line1 = self._render_cached_text("STATION NORTH • PC SUITE EMULATION", 20, bold=True, color=NORD6)
+            line2 = self._render_cached_text("Companion Video Engine: PyQt6 + libmpv OpenGL Pipeline", 14, bold=True, color=NORD8)
+            line3 = self._render_cached_text("Target Hardware: dArkOS / RK3326 Handheld (Mali-G31 DRM)", 13, bold=False, color=NORD4)
+            line4 = self._render_cached_text("On Handhelds, video renders zero-latency direct to KMS/DRM framebuffer.", 12, bold=False, color=NORD4)
+            line5 = self._render_cached_text("On PC, broadcast is projected into the dedicated GPU companion window.", 12, bold=False, color=NORD4)
+            hint_str = "[0] / CLICK: FULLSCREEN VIDEO • [ESC] DECK"
+            fs_hint_str = "DOUBLE-CLICK / [0] FOR FULLSCREEN"
+
         self.screen.blit(line1, (vm_x + 24, vm_y + 140))
         self.screen.blit(line2, (vm_x + 24, vm_y + 172))
         self.screen.blit(line3, (vm_x + 24, vm_y + 200))
@@ -4669,7 +4682,7 @@ class SNfetchDashboard:
         self.screen.blit(line5, (vm_x + 24, vm_y + 246))
 
         # Bottom Hint
-        hint_s = self._render_cached_text("[0] / CLICK: FULLSCREEN VIDEO • [ESC] DECK", 13, bold=True, color=NORD13)
+        hint_s = self._render_cached_text(hint_str, 13, bold=True, color=NORD13)
         self.screen.blit(hint_s, (vm_x + (vid_w - hint_s.get_width()) // 2, vm_y + vid_h - 32))
 
         # Inner CRT Border
@@ -4729,7 +4742,7 @@ class SNfetchDashboard:
             pygame.draw.rect(self.screen, NORD8 if b % 2 == 0 else NORD9, (bx, by, bar_w, bh), border_radius=3)
 
         # Fullscreen Hint
-        fs_hint = self._render_cached_text("DOUBLE-CLICK / [0] FOR FULLSCREEN", 14, bold=True, color=NORD13)
+        fs_hint = self._render_cached_text(fs_hint_str, 14, bold=True, color=NORD13)
         self.screen.blit(fs_hint, (rp_x + (rp_w - fs_hint.get_width()) // 2, rp_y + rp_h - 28))
 
         # 2. Untere Karte (Card 2): Kompakte Cockpit-Box (Height = 130px)
@@ -4776,6 +4789,38 @@ class SNfetchDashboard:
             thumb_surf = self.thumb_mgr.get_thumbnail(yt_id, title, size=(SCREEN_WIDTH, SCREEN_HEIGHT))
             self.screen.blit(thumb_surf, (0, 0))
 
+        # 1. Proportional Watermark Logo in bottom right corner (doubled size, matching companion_tv.py)
+        if hasattr(self, "logo_img") and self.logo_img:
+            logo_h = int(SCREEN_HEIGHT * 0.13)
+            orig_w, orig_h = self.logo_img.get_size()
+            logo_w = int(logo_h * (orig_w / orig_h))
+            scaled_wm = pygame.transform.smoothscale(self.logo_img, (logo_w, logo_h))
+            scaled_wm.set_alpha(175)
+            self.screen.blit(scaled_wm, (SCREEN_WIDTH - logo_w - int(SCREEN_WIDTH * 0.03), SCREEN_HEIGHT - logo_h - int(SCREEN_HEIGHT * 0.035)))
+
+        # 2. Lower Third (Bauchbinde) in Top Right Corner (auto-hides after 6s, matching companion_tv.py)
+        track_start_time = getattr(self, "tv_track_start_time", 0.0)
+        if time.time() - track_start_time < 6.0:
+            track = self.playlist[self.current_idx] if self.current_idx < len(self.playlist) else {}
+            title = track.get("title", "Unknown Title")
+            artist = track.get("artist", "The Queen's Frequency")
+            lt_w = 420
+            lt_h = 58
+            lt_x = SCREEN_WIDTH - lt_w - int(SCREEN_WIDTH * 0.03)
+            lt_y = int(SCREEN_HEIGHT * 0.035)
+
+            lt_surf = pygame.Surface((lt_w, lt_h), pygame.SRCALPHA)
+            pygame.draw.rect(lt_surf, (20, 26, 38, 230), (0, 0, lt_w, lt_h), border_radius=12)
+            pygame.draw.rect(lt_surf, (76, 86, 106, 215), (0, 0, lt_w, lt_h), width=1, border_radius=12)
+            pygame.draw.rect(lt_surf, NORD8, (0, 0, 5, lt_h), border_top_left_radius=12, border_bottom_left_radius=12)
+            self.screen.blit(lt_surf, (lt_x, lt_y))
+
+            lt_artist_surf = self._render_cached_text(artist, 16, bold=True, color=NORD6)
+            self.screen.blit(lt_artist_surf, (lt_x + 16, lt_y + 8))
+
+            lt_title_surf = self._render_cached_text(f"{title} • Television Broadcast", 13, bold=True, color=NORD8)
+            self.screen.blit(lt_title_surf, (lt_x + 16, lt_y + 32))
+
         # Auto-hide overlay check after 3.5s of inactivity
         if time.time() - self.tv_osd_last_interaction > 3.5:
             self.tv_osd_visible = False
@@ -4794,7 +4839,10 @@ class SNfetchDashboard:
 
             self.draw_5_button_cockpit(self.screen, card_x + 16, card_y + 14, card_w - 32, height=108)
         else:
-            hint_s = self._render_cached_text("PRESS [0] OR [ESC] TO EXIT FULLSCREEN • MOVE MOUSE FOR CONTROLS", 13, bold=False, color=NORD3)
+            if self.platform.is_handheld:
+                hint_s = self._render_cached_text("[B] / [START]: VOLLBILD BEENDEN • D-PAD: STEUERUNG", 13, bold=False, color=NORD3)
+            else:
+                hint_s = self._render_cached_text("PRESS [0] OR [ESC] TO EXIT FULLSCREEN • MOVE MOUSE FOR CONTROLS", 13, bold=False, color=NORD3)
             self.screen.blit(hint_s, ((SCREEN_WIDTH - hint_s.get_width()) // 2, 742))
 
     def _trigger_cockpit_action(self, idx: int):
