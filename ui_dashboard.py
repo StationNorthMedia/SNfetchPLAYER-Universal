@@ -2548,8 +2548,28 @@ class SNfetchDashboard:
             logging.warning(f"Could not prepare logo overlay: {e}")
         return None
 
+    def _get_pc_mpv_input_conf(self) -> str:
+        conf_path = Path("/tmp/sn_mpv_pc.conf")
+        try:
+            conf_path.write_text(
+                "q quit 4\n"
+                "ESC quit 4\n"
+                "BS quit 4\n"
+                "CLOSE_WIN quit 4\n"
+                "ENTER quit 5\n"
+                "RIGHT quit 5\n"
+                "LEFT quit 6\n"
+                "SPACE cycle pause\n"
+                "UP add volume 5\n"
+                "DOWN add volume -5\n"
+                "f cycle fullscreen\n"
+            )
+        except Exception:
+            pass
+        return str(conf_path)
+
     def launch_video_playback(self, start_idx: int, manual_trigger: bool = True):
-        """Plays fullscreen video with 4:3 display fill and floating OSD on manual skip"""
+        """Plays video (windowed on PC, 4:3 fullscreen on handheld) with floating OSD on manual skip"""
         self.stop_audio()
         curr_idx = start_idx
         show_osd_this_track = manual_trigger
@@ -2563,7 +2583,7 @@ class SNfetchDashboard:
             if not pygame.display.get_init():
                 pygame.display.init()
                 self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), DISPLAY_FLAGS)
-                pygame.mouse.set_visible(False)
+            pygame.mouse.set_visible(IS_WINDOWED)
 
             track = self.playlist[curr_idx]
             track_title = track.get("title", "Title")
@@ -2578,7 +2598,7 @@ class SNfetchDashboard:
                     if not pygame.display.get_init():
                         pygame.display.init()
                         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), DISPLAY_FLAGS)
-                        pygame.mouse.set_visible(False)
+                    pygame.mouse.set_visible(IS_WINDOWED)
 
             # Interactive Crate-Digging Resolver (0ms on pre-fetch cache hit, 60 FPS vinyl animation if loading)
             stream_url, was_cancelled = self.resolve_stream_interactive(track, is_tv=True)
@@ -2605,204 +2625,265 @@ class SNfetchDashboard:
 
             is_local = track.get("is_local", False) or not (stream_url.startswith("http://") or stream_url.startswith("https://"))
             is_audio_only = is_local and Path(stream_url).suffix.lower() in {".mp3", ".flac", ".ogg", ".wav", ".m4a", ".opus", ".aac"}
-            if not is_audio_only:
-                # 4:3 Display-Fill + 65% Logo Transparenz + Elegante Bauchbinde (Crash-sicheres Scale & Crop)
-                vf_filter = (
-                    f"scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [main]; "
-                    f"movie={logo_path},scale=175:-1,format=rgba,colorchannelmixer=aa=0.65 [logo]; "
-                    f"[main][logo] overlay=main_w-overlay_w-30:main_h-overlay_h-26, "
-                    f"ass='{osd_file}'"
-                )
-                cmd = [
-                    "ffplay",
-                    "-fs",
-                    "-autoexit",
-                    "-sync", "audio",
-                    "-window_title", f"STATION NORTH • {track_artist} - {track_title}",
-                    "-loglevel", "error",
-                    "-vf", vf_filter,
-                    stream_url
-                ]
-            else:
-                # Local audio file played in TV mode: show Station North visualizer waves + ASS banner
-                vf_filter = (
-                    f"movie={logo_path},scale=240:-1,format=rgba,colorchannelmixer=aa=0.75 [logo]; "
-                    f"[in][logo] overlay=(W-w)/2:(H-h)/2, "
-                    f"ass='{osd_file}'"
-                )
-                cmd = [
-                    "ffplay",
-                    "-fs",
-                    "-autoexit",
-                    "-sync", "audio",
-                    "-window_title", f"STATION NORTH • {track_artist} - {track_title}",
-                    "-loglevel", "error",
-                    "-showmode", "waves",
-                    "-vf", vf_filter,
-                    stream_url
-                ]
+            logo_overlay = self._get_tv_logo_overlay_path()
 
-            player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if shutil.which("mpv") else None)
-            if not player_bin:
-                logging.error("Neither ffplay nor mpv found on device.")
-                self.show_loading_screen("VIDEO PLAYER NOT FOUND", "Install ffplay or mpv for video playback")
-                time.sleep(2.0)
-                return
-
-            if player_bin == "mpv":
-                logo_overlay = self._get_tv_logo_overlay_path()
-                cmd = [
-                    "mpv",
-                    "--fullscreen",
-                    "--geometry=1024x768",
-                    "--vo=wlshm",
-                    "--vd-lavc-threads=4",
-                    "--sws-scaler=fast-bilinear",
-                    "--sws-fast=yes",
-                    "--audio-fallback-to-null=yes",
-                    "--keep-open=no",
-                    "--force-window=yes",
-                    f"--sub-file={osd_file}",
-                    f"--title=STATION NORTH • {track_artist} - {track_title}",
-                ]
-                if logo_overlay:
-                    cmd.extend([
-                        f"--external-file={logo_overlay}",
-                        "--lavfi-complex=[vid1] scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [main]; [main][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
-                    ])
+            # Platform-Specific Player Selection & Command:
+            if self.platform.is_pc:
+                if shutil.which("mpv"):
+                    conf_file = self._get_pc_mpv_input_conf()
+                    cmd = [
+                        "mpv",
+                        f"--input-conf={conf_file}",
+                        "--geometry=984x640",
+                        "--autofit=984x640",
+                        "--keep-open=no",
+                        "--force-window=yes",
+                        f"--sub-file={osd_file}",
+                        f"--title=STATION NORTH • {track_artist} - {track_title}",
+                    ]
+                    if logo_overlay:
+                        cmd.extend([
+                            f"--external-file={logo_overlay}",
+                            "--lavfi-complex=[vid1] scale=984:640:force_original_aspect_ratio=increase,crop=984:640 [main]; [main][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
+                        ])
+                    cmd.append(stream_url)
+                elif shutil.which("ffplay"):
+                    cmd = [
+                        "ffplay",
+                        "-autoexit",
+                        "-sync", "audio",
+                        "-x", "984", "-y", "640",
+                        "-window_title", f"STATION NORTH • {track_artist} - {track_title}",
+                        "-loglevel", "error",
+                        stream_url
+                    ]
                 else:
-                    cmd.extend([
-                        "--lavfi-complex=[vid1] scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [vo]"
-                    ])
-                cmd.append(stream_url)
+                    logging.error("Neither mpv nor ffplay found on PC.")
+                    self.show_loading_screen("VIDEO PLAYER NOT FOUND", "Install mpv or ffplay for video playback")
+                    time.sleep(2.0)
+                    return
+            else:
+                # Handheld (dArkOS / ROCKNIX / ArkOS)
+                player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if shutil.which("mpv") else None)
+                if not player_bin:
+                    logging.error("Neither ffplay nor mpv found on device.")
+                    self.show_loading_screen("VIDEO PLAYER NOT FOUND", "Install ffplay or mpv for video playback")
+                    time.sleep(2.0)
+                    return
+
+                if player_bin == "mpv":
+                    cmd = [
+                        "mpv",
+                        "--fullscreen",
+                        "--geometry=1024x768",
+                        "--vo=wlshm",
+                        "--vd-lavc-threads=4",
+                        "--sws-scaler=fast-bilinear",
+                        "--sws-fast=yes",
+                        "--audio-fallback-to-null=yes",
+                        "--keep-open=no",
+                        "--force-window=yes",
+                        f"--sub-file={osd_file}",
+                        f"--title=STATION NORTH • {track_artist} - {track_title}",
+                    ]
+                    if logo_overlay:
+                        cmd.extend([
+                            f"--external-file={logo_overlay}",
+                            "--lavfi-complex=[vid1] scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [main]; [main][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
+                        ])
+                    else:
+                        cmd.extend([
+                            "--lavfi-complex=[vid1] scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [vo]"
+                        ])
+                    cmd.append(stream_url)
+                else:
+                    vf_filter = (
+                        f"scale=1024:768:force_original_aspect_ratio=increase,crop=1024:768 [main]; "
+                        f"movie={logo_path},scale=175:-1,format=rgba,colorchannelmixer=aa=0.65 [logo]; "
+                        f"[main][logo] overlay=main_w-overlay_w-30:main_h-overlay_h-26, "
+                        f"ass='{osd_file}'"
+                    )
+                    cmd = [
+                        "ffplay",
+                        "-fs",
+                        "-autoexit",
+                        "-sync", "audio",
+                        "-window_title", f"STATION NORTH • {track_artist} - {track_title}",
+                        "-loglevel", "error",
+                        "-vf", vf_filter,
+                        stream_url
+                    ]
 
             try:
-                pygame.display.quit()
                 play_start_time = time.time()
-                env = os.environ.copy()
-                env["WAYLAND_DISPLAY"] = env.get("WAYLAND_DISPLAY", "wayland-1")
-                env["XDG_RUNTIME_DIR"] = env.get("XDG_RUNTIME_DIR", "/run/0-runtime-dir")
-                env["SWAYSOCK"] = env.get("SWAYSOCK", "/run/0-runtime-dir/sway-ipc.0.sock")
-                proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
-                self._trigger_prefetch_next_track(curr_idx, is_tv=True)
+                if self.platform.is_pc:
+                    env = os.environ.copy()
+                    proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
+                else:
+                    pygame.display.quit()
+                    env = os.environ.copy()
+                    env["WAYLAND_DISPLAY"] = env.get("WAYLAND_DISPLAY", "wayland-1")
+                    env["XDG_RUNTIME_DIR"] = env.get("XDG_RUNTIME_DIR", "/run/0-runtime-dir")
+                    env["SWAYSOCK"] = env.get("SWAYSOCK", "/run/0-runtime-dir/sway-ipc.0.sock")
+                    proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
 
-                def _sway_focus():
-                    time.sleep(0.15)
-                    for _ in range(5):
-                        subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
-                        subprocess.run(["swaymsg", '[class="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
-                        time.sleep(0.2)
-                threading.Thread(target=_sway_focus, daemon=True).start()
+                    def _sway_focus():
+                        time.sleep(0.15)
+                        for _ in range(5):
+                            subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
+                            subprocess.run(["swaymsg", '[class="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
+                            time.sleep(0.2)
+                    threading.Thread(target=_sway_focus, daemon=True).start()
+
+                self._trigger_prefetch_next_track(curr_idx, is_tv=True)
             except Exception as e:
                 logging.error(f"Failed to launch video player: {e}")
                 if not pygame.display.get_init():
                     pygame.display.init()
                     self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), DISPLAY_FLAGS)
-                    pygame.mouse.set_visible(False)
+                pygame.mouse.set_visible(IS_WINDOWED)
                 self.show_loading_screen("PLAYBACK ERROR", f"Cannot launch video player: {e}")
                 time.sleep(2.0)
                 return
 
-            input_reader = LinuxGamepadReader()
+            input_reader = None if self.platform.is_pc else LinuxGamepadReader()
             action = "AUTO"
             is_paused = False
 
             while proc.poll() is None:
-                # 1. Universal PortMaster Kill: SELECT (314 / 15) + START (315 / 25)
-                if ({314, 315}.issubset(input_reader.pressed_keys) or 
-                    {15, 25}.issubset(input_reader.pressed_keys) or
-                    {314, 28}.issubset(input_reader.pressed_keys)):
-                    input_reader.close()
-                    proc.kill()
-                    sys.exit(0)
-
-                # 2. Immediate [B] / ESC / Q: Exit video (instant, 0ms)
-                if any(k in input_reader.pressed_keys for k in (305, 1, 14, 16)):
-                    action = "EXIT"
-                    break
-
-                events = input_reader.read_events(0.04)
                 should_break = False
-                for ev_type, ev_code, ev_val in events:
-                    if ev_type == 1 and ev_val == 1:  # EV_KEY press
-                        # START / P / ENTER -> Play / Pause
-                        if ev_code in (315, 25, 706, 28):
-                            if is_paused:
-                                os.kill(proc.pid, signal.SIGCONT)
-                                is_paused = False
-                            else:
-                                os.kill(proc.pid, signal.SIGSTOP)
-                                is_paused = True
-
-                        # [B] / ESC / Q -> Zurueck / Exit
-                        elif ev_code in (305, 1, 14, 16):
+                if self.platform.is_pc:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
                             action = "EXIT"
+                            proc.terminate()
                             should_break = True
                             break
+                        elif event.type == pygame.KEYDOWN:
+                            if event.key in (pygame.K_ESCAPE, pygame.K_q, pygame.K_b):
+                                action = "EXIT"
+                                proc.terminate()
+                                should_break = True
+                                break
+                            elif event.key in (pygame.K_RIGHT, pygame.K_n):
+                                action = "NEXT"
+                                proc.terminate()
+                                should_break = True
+                                break
+                            elif event.key in (pygame.K_LEFT, pygame.K_p):
+                                action = "PREV"
+                                proc.terminate()
+                                should_break = True
+                                break
+                            elif event.key in (pygame.K_SPACE, pygame.K_RETURN):
+                                if is_paused:
+                                    os.kill(proc.pid, signal.SIGCONT)
+                                    is_paused = False
+                                else:
+                                    os.kill(proc.pid, signal.SIGSTOP)
+                                    is_paused = True
+                        elif event.type == pygame.MOUSEBUTTONDOWN:
+                            action = "EXIT"
+                            proc.terminate()
+                            should_break = True
+                            break
+                        elif event.type == pygame.MOUSEWHEEL:
+                            if event.y > 0:
+                                self._trigger_volume_change(+5)
+                            elif event.y < 0:
+                                self._trigger_volume_change(-5)
+                    time.sleep(0.04)
+                else:
+                    # Handheld Hardware Gamepad Events
+                    if ({314, 315}.issubset(input_reader.pressed_keys) or 
+                        {15, 25}.issubset(input_reader.pressed_keys) or
+                        {314, 28}.issubset(input_reader.pressed_keys)):
+                        input_reader.close()
+                        proc.kill()
+                        sys.exit(0)
 
-                        # [►] Steuerkreuz / R1 / DPAD Right -> Naechstes Video
-                        elif ev_code in (547, 311, 106):
-                            if is_paused:
-                                os.kill(proc.pid, signal.SIGCONT)
-                            action = "NEXT"
-                            should_break = True
-                            break
+                    if any(k in input_reader.pressed_keys for k in (305, 1, 14, 16)):
+                        action = "EXIT"
+                        break
 
-                        # [◄] Steuerkreuz / L1 / DPAD Left -> Vorheriges Video
-                        elif ev_code in (546, 310, 105):
-                            if is_paused:
-                                os.kill(proc.pid, signal.SIGCONT)
-                            action = "PREV"
-                            should_break = True
-                            break
-
-                        # [X] & [Y] -> Repeat Toggle
-                        elif ev_code in (307, 33, 308, 21):
-                            self.shuffle_mgr.toggle_repeat()
-
-                    elif ev_type == 3 and ev_code in (0, 16):  # EV_ABS code 0 (ABS_X)
-                        # Safe deadzone: require > 18000 (over 55% deflection) to avoid drift skips!
-                        if ev_val > 18000:
-                            if is_paused:
-                                os.kill(proc.pid, signal.SIGCONT)
-                            action = "NEXT"
-                            should_break = True
-                            break
-                        elif ev_val < -18000:
-                            if is_paused:
-                                os.kill(proc.pid, signal.SIGCONT)
-                            action = "PREV"
-                            should_break = True
-                            break
+                    events = input_reader.read_events(0.04)
+                    for ev_type, ev_code, ev_val in events:
+                        if ev_type == 1 and ev_val == 1:
+                            if ev_code in (315, 25, 706, 28):
+                                if is_paused:
+                                    os.kill(proc.pid, signal.SIGCONT)
+                                    is_paused = False
+                                else:
+                                    os.kill(proc.pid, signal.SIGSTOP)
+                                    is_paused = True
+                            elif ev_code in (305, 1, 14, 16):
+                                action = "EXIT"
+                                should_break = True
+                                break
+                            elif ev_code in (547, 311, 106):
+                                if is_paused:
+                                    os.kill(proc.pid, signal.SIGCONT)
+                                action = "NEXT"
+                                should_break = True
+                                break
+                            elif ev_code in (546, 310, 105):
+                                if is_paused:
+                                    os.kill(proc.pid, signal.SIGCONT)
+                                action = "PREV"
+                                should_break = True
+                                break
+                            elif ev_code in (307, 33, 308, 21):
+                                self.shuffle_mgr.toggle_repeat()
+                        elif ev_type == 3 and ev_code in (0, 16):
+                            if ev_val > 18000:
+                                if is_paused:
+                                    os.kill(proc.pid, signal.SIGCONT)
+                                action = "NEXT"
+                                should_break = True
+                                break
+                            elif ev_val < -18000:
+                                if is_paused:
+                                    os.kill(proc.pid, signal.SIGCONT)
+                                action = "PREV"
+                                should_break = True
+                                break
 
                 if should_break:
                     break
 
-            input_reader.close()
+            if input_reader:
+                input_reader.close()
             if is_paused:
                 try:
                     os.kill(proc.pid, signal.SIGCONT)
                 except Exception:
                     pass
 
-            # Sicherstellen, dass ffplay sofort beendet wird
+            # Ensure process terminates cleanly
             if proc.poll() is None:
                 proc.terminate()
                 try:
                     proc.wait(timeout=0.3)
                 except Exception:
                     proc.kill()
-                proc.kill()
-                try:
-                    proc.wait(timeout=0.3)
-                except Exception:
-                    pass
 
             elapsed = time.time() - play_start_time
 
-            # If a video stream ends abnormally fast (< 3.0s) without user input, auto-advance to next video
-            if action == "AUTO" and elapsed < 3.0:
-                action = "NEXT"
+            # Evaluate termination for PC:
+            if self.platform.is_pc:
+                rc = proc.poll()
+                # Codes 4, 1, 2, -15, -9 or explicit action "EXIT"
+                if rc in (4, 1, 2, -15, -9) or action == "EXIT":
+                    action = "EXIT"
+                elif rc == 5:
+                    action = "NEXT"
+                elif rc == 6:
+                    action = "PREV"
+                elif action == "AUTO" and elapsed < 4.0:
+                    action = "EXIT"
+            else:
+                if action == "AUTO" and elapsed < 3.0:
+                    action = "NEXT"
 
             if action == "EXIT":
                 self.current_idx = curr_idx
@@ -2825,13 +2906,41 @@ class SNfetchDashboard:
         if not pygame.display.get_init():
             pygame.display.init()
             self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), DISPLAY_FLAGS)
-            pygame.mouse.set_visible(False)
+        pygame.mouse.set_visible(IS_WINDOWED)
         pygame.display.set_caption("Station North • SNfetchPLAYER")
         time.sleep(0.12)
         pygame.event.clear()
         self.is_playing = False
 
     def _play_tv_station_id_fullscreen(self, clip_path: Path) -> bool:
+        if self.platform.is_pc:
+            if not clip_path.exists():
+                return True
+            try:
+                conf_file = self._get_pc_mpv_input_conf()
+                proc = subprocess.Popen([
+                    "mpv",
+                    f"--input-conf={conf_file}",
+                    "--geometry=984x640",
+                    "--autofit=984x640",
+                    "--keep-open=no",
+                    "--title=STATION NORTH TV IDENT",
+                    str(clip_path)
+                ], stdin=subprocess.DEVNULL)
+                interrupted = False
+                while proc.poll() is None:
+                    for ev in pygame.event.get():
+                        if ev.type in (pygame.QUIT, pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+                            proc.terminate()
+                            interrupted = True
+                            break
+                    time.sleep(0.04)
+                if proc.poll() in (4, 1, 2, -15):
+                    interrupted = True
+                return not interrupted
+            except Exception:
+                return True
+
         logo_file = APP_DIR / "sn_logo.png"
         logo_path = str(logo_file) if logo_file.exists() else str(Path("sn_logo.png").resolve())
 
@@ -2903,7 +3012,7 @@ class SNfetchDashboard:
             if not pygame.display.get_init():
                 pygame.display.init()
                 self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), DISPLAY_FLAGS)
-                pygame.mouse.set_visible(False)
+            pygame.mouse.set_visible(IS_WINDOWED)
             return True
 
         input_reader = LinuxGamepadReader()
@@ -4688,6 +4797,68 @@ class SNfetchDashboard:
 
         return True
 
+    def _is_mouse_over_interactive_element(self, mx: int, my: int) -> bool:
+        """Determines if the mouse cursor is hovering over any interactive button or card"""
+        if my > 700 and mx < 240:
+            return True
+
+        if self.state == STATE_SPLASH:
+            card_w = 230
+            card_h = 320
+            gap = 20
+            right_col_w = 160
+            right_card_h = (card_h - gap) // 2
+            total_w = 3 * card_w + right_col_w + 3 * gap
+            start_x = (SCREEN_WIDTH - total_w) // 2
+            card_y = 388
+            for i in range(3):
+                if pygame.Rect(start_x + i * (card_w + gap), card_y, card_w, card_h).collidepoint(mx, my):
+                    return True
+            if pygame.Rect(start_x + 3 * (card_w + gap), card_y, right_col_w, right_card_h).collidepoint(mx, my):
+                return True
+            if pygame.Rect(start_x + 3 * (card_w + gap), card_y + right_card_h + gap, right_col_w, right_card_h).collidepoint(mx, my):
+                return True
+
+        elif self.state in (STATE_RADIO, STATE_TV):
+            # Card 1 (Disc area or Video Thumbnail)
+            if pygame.Rect(20, 66, 984, 368).collidepoint(mx, my):
+                return True
+            # Card 2 (5 Cockpit Buttons)
+            btn_area_x = 36
+            btn_area_w = 952
+            btn_y = 538
+            btn_h = 155
+            gap = 14
+            btn_w = (btn_area_w - 4 * gap) // 5
+            if btn_y <= my <= btn_y + btn_h and btn_area_x <= mx <= btn_area_x + btn_area_w:
+                for i in range(5):
+                    bx = btn_area_x + i * (btn_w + gap)
+                    if bx <= mx <= bx + btn_w:
+                        return True
+
+        elif self.state == STATE_CHRONICLES:
+            col1_x = 40
+            col1_w = 440
+            panel_y = 66
+            panel_h = 504
+            if mx < col1_x + 120 and (panel_y + panel_h - 50 < my < panel_y + panel_h):
+                return True
+            if mx > col1_x + col1_w - 120 and (panel_y + panel_h - 50 < my < panel_y + panel_h):
+                return True
+            if col1_x <= mx <= col1_x + col1_w and panel_y <= my <= panel_y + panel_h + 140:
+                return True
+
+        elif self.state == STATE_SETTINGS:
+            start_y = 88
+            row_h = 60
+            box_w = 480
+            for i in range(8):
+                ry = start_y + i * (row_h + 8)
+                if 30 <= mx <= 30 + box_w and ry <= my <= ry + row_h:
+                    return True
+
+        return False
+
     def _handle_mouse_click(self, mx: int, my: int):
         now = time.time()
         if self.state == STATE_SPLASH:
@@ -4719,8 +4890,60 @@ class SNfetchDashboard:
                     self._handle_action_key(pygame.K_RETURN)
                     return
 
+        elif self.state == STATE_RADIO:
+            if my > 700 and mx < 240:
+                self._handle_action_key(pygame.K_ESCAPE)
+                return
+
+            # Card 1: Vinyl Disc area -> Play / Pause Toggle
+            card1_rect = pygame.Rect(20, 66, 984, 368)
+            if card1_rect.collidepoint(mx, my):
+                self._handle_action_key(pygame.K_RETURN)
+                return
+
+            # Card 2: 5 Cockpit Buttons
+            btn_area_x = 36
+            btn_area_w = 952
+            btn_y = 538
+            btn_h = 155
+            gap = 14
+            btn_w = (btn_area_w - 4 * gap) // 5
+            if btn_y <= my <= btn_y + btn_h and btn_area_x <= mx <= btn_area_x + btn_area_w:
+                for i in range(5):
+                    bx = btn_area_x + i * (btn_w + gap)
+                    if bx <= mx <= bx + btn_w:
+                        self.cockpit_focus_idx = i
+                        self._trigger_cockpit_action(i)
+                        return
+
+        elif self.state == STATE_TV:
+            if my > 700 and mx < 240:
+                self._handle_action_key(pygame.K_ESCAPE)
+                return
+
+            # Card 1: Video Thumbnail -> Start Video Playback
+            card1_rect = pygame.Rect(20, 66, 984, 368)
+            if card1_rect.collidepoint(mx, my):
+                self._handle_action_key(pygame.K_RETURN)
+                return
+
+            # Card 2: 5 Cockpit Buttons
+            btn_area_x = 36
+            btn_area_w = 952
+            btn_y = 538
+            btn_h = 155
+            gap = 14
+            btn_w = (btn_area_w - 4 * gap) // 5
+            if btn_y <= my <= btn_y + btn_h and btn_area_x <= mx <= btn_area_x + btn_area_w:
+                for i in range(5):
+                    bx = btn_area_x + i * (btn_w + gap)
+                    if bx <= mx <= bx + btn_w:
+                        self.cockpit_focus_idx = i
+                        self._trigger_cockpit_action(i)
+                        return
+
         elif self.state == STATE_CHRONICLES:
-            if my > 700 and mx < 220:
+            if my > 700 and mx < 240:
                 self._handle_action_key(pygame.K_ESCAPE)
                 return
             col1_x = 40
@@ -4737,10 +4960,21 @@ class SNfetchDashboard:
                 self.toggle_chronicles_audio()
                 return
 
-        elif self.state in (STATE_RADIO, STATE_TV, STATE_SETTINGS):
-            if my > 700 and mx < 220:
+        elif self.state == STATE_SETTINGS:
+            if my > 700 and mx < 240:
                 self._handle_action_key(pygame.K_ESCAPE)
                 return
+
+            start_y = 88
+            row_h = 60
+            box_w = 480
+            for i in range(8):
+                ry = start_y + i * (row_h + 8)
+                if 30 <= mx <= 30 + box_w and ry <= my <= ry + row_h:
+                    self.settings_cursor = i
+                    self.settings_column = 0
+                    self._handle_action_key(pygame.K_RETURN)
+                    return
 
     # =========================================================================
     # EVENT LOOP & EXECUTION
@@ -4786,6 +5020,16 @@ class SNfetchDashboard:
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     if event.button == 1:
                         self._handle_mouse_click(event.pos[0], event.pos[1])
+
+                elif event.type == pygame.MOUSEMOTION:
+                    is_hover = self._is_mouse_over_interactive_element(event.pos[0], event.pos[1])
+                    pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_HAND if is_hover else pygame.SYSTEM_CURSOR_ARROW)
+
+                elif event.type == pygame.MOUSEWHEEL:
+                    if event.y > 0:
+                        self._trigger_volume_change(+5)
+                    elif event.y < 0:
+                        self._trigger_volume_change(-5)
 
                 elif event.type == pygame.KEYDOWN:
                     if not self._handle_action_key(event.key):
