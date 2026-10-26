@@ -26,7 +26,8 @@ def generate_osd_ass(
     output_path: str = "/tmp/sn_osd.ass"
 ) -> str:
     """
-    Generiert die ASS-Untertitel-Datei fuer Bauchbinden (Title & Artist) in mpv/ffplay.
+    Generiert die ASS-Untertitel-Datei für ffplay.
+    Wenn show_osd=False, bleibt das Video 100% sauber ohne Overlays.
     """
     ass_lines = [
         "[Script Info]",
@@ -40,9 +41,9 @@ def generate_osd_ass(
         f"Style: TopHeaderStyle, DejaVu Sans, 14, {COLOR_NORD8_CYAN}, &H00000000, &H00000000, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 3, 1, 7, 36, 10, 24, 1",
         # 1. Status Badge (oben in der Karte)
         f"Style: BadgeStyle, DejaVu Sans, 14, {COLOR_NORD14_GREEN if not is_repeat else COLOR_NORD13_GOLD}, &H00000000, &H00000000, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 3, 1, 1, 36, 10, 96, 1",
-        # 2. Titel: Grosse, fette Schrift (26pt)
+        # 2. Titel: Große, fette Schrift (26pt)
         f"Style: TitleStyle, DejaVu Sans, 26, {COLOR_NORD6_SNOW}, &H00000000, {COLOR_NORD2_BORDER}, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 5, 2, 1, 36, 10, 62, 1",
-        # 3. Artist: Schoene Schrift (19pt)
+        # 3. Artist: Schöne Schrift (19pt)
         f"Style: ArtistStyle, DejaVu Sans, 19, {COLOR_NORD8_CYAN}, &H00000000, {COLOR_NORD2_BORDER}, {COLOR_NORD0_BG}, 1, 0, 0, 0, 100, 100, 0, 0, 3, 4, 2, 1, 36, 10, 32, 1",
         "",
         "[Events]",

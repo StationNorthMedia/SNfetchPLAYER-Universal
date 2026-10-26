@@ -2018,6 +2018,34 @@ class SNfetchDashboard:
         pygame.image.save(overlay, output_path)
         return output_path
 
+    def _get_tv_logo_overlay_path(self) -> Optional[str]:
+        """
+        Original dArkOS TV Watermark:
+        Bereitet sn_logo.png mit 175px Breite und 65% Transparenz fuer Hardware-Overlay vor.
+        Wird nach /tmp/sn_logo_overlay.png gecacht, damit mpv 0% CPU verbraucht.
+        """
+        overlay_path = "/tmp/sn_logo_overlay.png"
+        if Path(overlay_path).exists():
+            return overlay_path
+        try:
+            from PIL import Image
+            src = APP_DIR / "sn_logo.png"
+            if not src.exists():
+                src = Path("sn_logo.png").resolve()
+            if src.exists():
+                im = Image.open(src).convert("RGBA")
+                w = 175
+                h = int(im.height * (w / im.width))
+                im = im.resize((w, h), Image.Resampling.LANCZOS)
+                r, g, b, a = im.split()
+                a = a.point(lambda p: int(p * 0.65))
+                im = Image.merge("RGBA", (r, g, b, a))
+                im.save(overlay_path)
+                return overlay_path
+        except Exception as e:
+            logging.warning(f"Could not prepare logo overlay: {e}")
+        return None
+
     def launch_video_playback(self, start_idx: int, manual_trigger: bool = True):
         """Plays fullscreen video with 4:3 display fill and floating OSD on manual skip"""
         self.stop_audio()
@@ -2120,10 +2148,7 @@ class SNfetchDashboard:
                 return
 
             if player_bin == "mpv":
-                watermark_file = APP_DIR / "sn_logo_watermark.png"
-                if not watermark_file.exists():
-                    watermark_file = Path("sn_logo_watermark.png").resolve()
-
+                logo_overlay = self._get_tv_logo_overlay_path()
                 cmd = [
                     "mpv",
                     "--fullscreen",
@@ -2138,9 +2163,9 @@ class SNfetchDashboard:
                     f"--sub-file={osd_file}",
                     f"--title=STATION NORTH • {track_artist} - {track_title}",
                 ]
-                if watermark_file.exists():
+                if logo_overlay:
                     cmd.extend([
-                        f"--external-file={str(watermark_file)}",
+                        f"--external-file={logo_overlay}",
                         "--lavfi-complex=[vid1][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
                     ])
                 cmd.append(stream_url)
@@ -2317,10 +2342,7 @@ class SNfetchDashboard:
             return True
 
         if player_bin == "mpv":
-            watermark_file = APP_DIR / "sn_logo_watermark.png"
-            if not watermark_file.exists():
-                watermark_file = Path("sn_logo_watermark.png").resolve()
-
+            logo_overlay = self._get_tv_logo_overlay_path()
             cmd = [
                 "mpv",
                 "--fullscreen",
@@ -2334,9 +2356,9 @@ class SNfetchDashboard:
                 "--force-window=yes",
                 "--title=STATION NORTH TV IDENT",
             ]
-            if watermark_file.exists():
+            if logo_overlay:
                 cmd.extend([
-                    f"--external-file={str(watermark_file)}",
+                    f"--external-file={logo_overlay}",
                     "--lavfi-complex=[vid1][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
                 ])
             cmd.append(str(clip_path))
