@@ -4354,3 +4354,7 @@ class SNfetchDashboard:
             j, t, c, tot, pct = self.get_asset_stats()
             self.settings_feedback_msg = f"Asset Sync Triggered ({tot} found, {int(pct)}% ready)!"
             self.settings_feedback_time = time.time()
+
+if __name__ == "__main__":
+    app = SNfetchDashboard()
+    app.run()

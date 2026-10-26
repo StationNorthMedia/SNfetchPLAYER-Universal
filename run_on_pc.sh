@@ -12,4 +12,4 @@ fi
 echo "🚀 Starte Station North SNfetchPLAYER im PC-Fenstermodus..."
 export SN_WINDOWED=1
 cd "$DIR"
-exec "$VENV/bin/python3" ui_dashboard.py "$@"
+exec "$VENV/bin/python3" -W ignore player.py "$@"
