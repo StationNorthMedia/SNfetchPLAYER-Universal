@@ -2487,8 +2487,30 @@ class SNfetchDashboard:
             self.trigger_play_tv_track_async(self.current_idx)
         elif event in ("paused", "resumed"):
             self.is_tv_playing = (event == "resumed")
+        elif event == "switch_mode":
+            mode = data.get("mode")
+            if mode == "radio":
+                if self.tv_companion:
+                    self.tv_companion.stop()
+                    self.tv_companion.send_command({"action": "hide"})
+                self.state = STATE_RADIO
+                self._state_transition_time = time.time()
+                self._load_active_playlist(is_tv=False)
+                self.trigger_play_track_async(self.current_idx)
+            elif mode == "settings":
+                if self.tv_companion:
+                    self.tv_companion.stop()
+                    self.tv_companion.send_command({"action": "hide"})
+                self.previous_state = STATE_TV
+                self.state = STATE_SETTINGS
+                self._state_transition_time = time.time()
         elif event == "return_to_deck":
             self.is_tv_fullscreen = False
+            if self.tv_companion:
+                self.tv_companion.stop()
+                self.tv_companion.send_command({"action": "hide"})
+            self.state = STATE_SPLASH
+            self._state_transition_time = time.time()
 
     def stop_tv_video(self):
         with self._audio_lock:
