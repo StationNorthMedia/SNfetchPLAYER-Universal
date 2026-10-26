@@ -622,7 +622,10 @@ class IntegratedVisualizer:
                     h = 14.0 + 195.0 * curve
                     bands.append(h)
 
-                self.target_heights = bands
+                for i in range(self.num_bars):
+                    # Temporal exponential smoothing for butter-smooth spectrum (eliminates single-window flutter)
+                    self.target_heights[i] = self.target_heights[i] * 0.35 + bands[i] * 0.65
+
                 self.has_real_audio = True
                 self.last_audio_feed = time.time()
                 return
@@ -663,7 +666,9 @@ class IntegratedVisualizer:
                 h = 14.0 + 195.0 * curve
                 bands.append(h)
 
-            self.target_heights = bands
+            for i in range(self.num_bars):
+                self.target_heights[i] = self.target_heights[i] * 0.35 + bands[i] * 0.65
+
             self.has_real_audio = True
             self.last_audio_feed = time.time()
         except Exception:
@@ -673,13 +678,14 @@ class IntegratedVisualizer:
         now = time.time()
         dt = now - self.last_update
         self.last_update = now
+        dt = min(0.05, max(0.001, dt))
 
         # 1. Real FFT spectrum (active when raw PCM chunk was fed within last 0.8s)
         if is_active and self.has_real_audio and (now - self.last_audio_feed) < 0.8:
             for i in range(self.num_bars):
-                # 100% Instant Attack (blitzschneller Bass-Punch), natürliches elastisches Decay
+                # Snappy attack, butter-smooth organic decay
                 if self.target_heights[i] > self.heights[i]:
-                    self.heights[i] = self.target_heights[i]
+                    self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 42.0)
                 else:
                     self.heights[i] += (self.target_heights[i] - self.heights[i]) * min(1.0, dt * 14.0)
         else:
@@ -2127,27 +2133,39 @@ class SNfetchDashboard:
             except Exception:
                 pass
         else:
-            # ZERO-LATENCY PIPE DRAIN FOR HARDWARE TAP (parec)
-            # Drains any accumulated backlog in the OS pipe and feeds ONLY the latest live chunk
+            # ZERO-LATENCY CONTINUOUS SLIDING WINDOW FOR HARDWARE TAP (parec)
             fd = proc.stdout.fileno()
             os.set_blocking(fd, False)
+            accum = b""
+            chunk_size = 1024  # 512 samples (~23.2ms FFT window)
+            hop_size = 512     # 256 samples (~11.6ms, 50% overlap for fluid continuous spectrum updates)
+
             try:
                 while proc and proc.poll() is None and self.is_playing:
-                    r, _, _ = select.select([fd], [], [], 0.04)
+                    r, _, _ = select.select([fd], [], [], 0.02)
                     if r:
-                        drained = b""
                         while True:
                             try:
                                 chunk = os.read(fd, 4096)
                                 if not chunk:
                                     break
-                                drained += chunk
+                                accum += chunk
                             except (BlockingIOError, InterruptedError):
                                 break
-                        if drained:
-                            latest = drained[-chunk_size:]
-                            if len(latest) >= 512:
-                                self.visualizer.feed_pcm(latest)
+
+                        # Keep pipe lean: if backlog exceeds 4096 bytes (>90ms), trim to freshest 2048 bytes
+                        if len(accum) > 4096:
+                            accum = accum[-2048:]
+
+                        # Feed overlapping windows to visualizer for continuous fluid response
+                        while len(accum) >= chunk_size:
+                            self.visualizer.feed_pcm(accum[:chunk_size])
+                            accum = accum[hop_size:]
+                    else:
+                        # If select timed out but we have at least 512 bytes, feed it
+                        if len(accum) >= 512:
+                            self.visualizer.feed_pcm(accum)
+                            accum = b""
             except Exception:
                 pass
             finally:
