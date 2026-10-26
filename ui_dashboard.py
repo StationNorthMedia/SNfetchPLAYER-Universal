@@ -54,7 +54,11 @@ pygame.event.set_blocked([
     pygame.JOYBUTTONUP,
 ])
 
-DISPLAY_FLAGS = pygame.FULLSCREEN | getattr(pygame, "SCALED", 0)
+IS_WINDOWED = os.environ.get("SN_WINDOWED") == "1" or "--window" in sys.argv
+if IS_WINDOWED:
+    DISPLAY_FLAGS = getattr(pygame, "SCALED", 0) | pygame.RESIZABLE
+else:
+    DISPLAY_FLAGS = pygame.FULLSCREEN | getattr(pygame, "SCALED", 0)
 
 from extractor import get_stream
 from osd_generator import generate_osd_ass
@@ -730,7 +734,7 @@ class SNfetchDashboard:
 
         self.screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), DISPLAY_FLAGS)
         pygame.display.set_caption("Station North • SNfetchPLAYER")
-        pygame.mouse.set_visible(False)
+        pygame.mouse.set_visible(IS_WINDOWED)
         self.clock = pygame.time.Clock()
 
         # Fonts (Elevated for high legibility on 3.5" handheld display)
