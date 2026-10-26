@@ -4661,11 +4661,11 @@ class SNfetchDashboard:
         if self.platform.is_handheld:
             line1 = self._render_cached_text("STATION NORTH • TV BROADCAST", 20, bold=True, color=NORD6)
             line2 = self._render_cached_text("Hardware DRM Video Pipeline (Mali-G31 Direct)", 14, bold=True, color=NORD8)
-            line3 = self._render_cached_text("● [A] Taste  : Vollbild-Wiedergabe starten", 14, bold=True, color=NORD14)
-            line4 = self._render_cached_text("● D-Pad ◄/►  : Sender & Video vor / zurück", 13, bold=False, color=NORD4)
-            line5 = self._render_cached_text("● [B] Taste  : Zurück zum Hauptmenü (Deck)", 13, bold=False, color=NORD4)
-            hint_str = "[A] VOLLBILD STARTEN • [B] HAUPTMENÜ"
-            fs_hint_str = "[A] VOLLBILD • [B] MENÜ"
+            line3 = self._render_cached_text("● [A] Button  : Launch Fullscreen Playback", 14, bold=True, color=NORD14)
+            line4 = self._render_cached_text("● D-Pad ◄/►   : Prev / Next Station & Video", 13, bold=False, color=NORD4)
+            line5 = self._render_cached_text("● [B] Button  : Return to Main Menu (Deck)", 13, bold=False, color=NORD4)
+            hint_str = "[A] LAUNCH FULLSCREEN • [B] MAIN MENU"
+            fs_hint_str = "[A] FULLSCREEN • [B] MENU"
         else:
             line1 = self._render_cached_text("STATION NORTH • PC SUITE EMULATION", 20, bold=True, color=NORD6)
             line2 = self._render_cached_text("Companion Video Engine: PyQt6 + libmpv OpenGL Pipeline", 14, bold=True, color=NORD8)
@@ -4840,7 +4840,7 @@ class SNfetchDashboard:
             self.draw_5_button_cockpit(self.screen, card_x + 16, card_y + 14, card_w - 32, height=108)
         else:
             if self.platform.is_handheld:
-                hint_s = self._render_cached_text("[B] / [START]: VOLLBILD BEENDEN • D-PAD: STEUERUNG", 13, bold=False, color=NORD3)
+                hint_s = self._render_cached_text("[B] / [START]: EXIT FULLSCREEN • D-PAD: CONTROLS", 13, bold=False, color=NORD3)
             else:
                 hint_s = self._render_cached_text("PRESS [0] OR [ESC] TO EXIT FULLSCREEN • MOVE MOUSE FOR CONTROLS", 13, bold=False, color=NORD3)
             self.screen.blit(hint_s, ((SCREEN_WIDTH - hint_s.get_width()) // 2, 742))
