@@ -9,9 +9,18 @@ import sys
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
-pylib_dir = str(APP_DIR / "pylib")
-if pylib_dir not in sys.path:
-    sys.path.insert(0, pylib_dir)
+
+import logging
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s")
+
+from platform_detector import get_platform
+platform_info = get_platform()
+platform_info.print_diagnostics()
+
+if platform_info.should_use_bundled_pylib:
+    pylib_dir = str(APP_DIR / "pylib")
+    if pylib_dir not in sys.path:
+        sys.path.insert(0, pylib_dir)
 
 from ui_dashboard import SNfetchDashboard
 

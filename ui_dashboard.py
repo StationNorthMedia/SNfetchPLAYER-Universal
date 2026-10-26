@@ -32,15 +32,23 @@ import subprocess
 import signal
 import shutil
 import logging
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import urllib.request
 import urllib.parse
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Union, Callable, Any
 
+from platform_detector import get_platform, PlatformType, AudioPipeline
+_PLATFORM = get_platform()
+
 APP_DIR = Path(__file__).resolve().parent
-pylib_dir = str(APP_DIR / "pylib")
-if pylib_dir not in sys.path:
-    sys.path.insert(0, pylib_dir)
+if _PLATFORM.should_use_bundled_pylib:
+    pylib_dir = str(APP_DIR / "pylib")
+    if pylib_dir not in sys.path:
+        sys.path.insert(0, pylib_dir)
 
 # Initialize Pygame with CFW default audio driver
 import pygame
@@ -89,7 +97,7 @@ else:
         pygame.JOYBALLMOTION,
     ])
 
-IS_WINDOWED = os.environ.get("SN_WINDOWED") == "1" or "--window" in sys.argv
+IS_WINDOWED = _PLATFORM.is_windowed or "--window" in sys.argv
 if IS_WINDOWED:
     DISPLAY_FLAGS = getattr(pygame, "SCALED", 0) | pygame.RESIZABLE
 else:
@@ -879,6 +887,7 @@ class LinuxGamepadReader:
 # =============================================================================
 class SNfetchDashboard:
     def __init__(self):
+        self.platform = _PLATFORM
         self.state = STATE_SPLASH
         self.previous_state = STATE_RADIO
 
@@ -1048,6 +1057,10 @@ class SNfetchDashboard:
         # Native direct ALSA audio output for dArkOS & ArkOS (RK3326)
         logging.info("Audio Sink: Native ALSA default configured.")
         return ["-f", "alsa", "default"]
+
+    @property
+    def audio_env(self) -> Dict[str, str]:
+        return self.platform.get_audio_env()
 
     def _load_font(self, size: int, bold=False, italic=False) -> pygame.font.Font:
         try:
@@ -1976,9 +1989,7 @@ class SNfetchDashboard:
                             pass
 
     def _start_audio_reader(self):
-        if self.audio_proc and self.audio_proc.stdout:
-            threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc, False), daemon=True).start()
-        elif shutil.which("parec"):
+        if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP:
             if self.audio_tap_proc and self.audio_tap_proc.poll() is None:
                 try:
                     self.audio_tap_proc.terminate()
@@ -1986,71 +1997,55 @@ class SNfetchDashboard:
                     pass
                 self.audio_tap_proc = None
 
-            env = dict(os.environ)
-            xdg = env.get("XDG_RUNTIME_DIR")
-            if not xdg or not os.path.exists(xdg):
-                for cand in ["/var/run/0-runtime-dir", "/run/0-runtime-dir", "/run/user/0"]:
-                    if os.path.exists(cand):
-                        env["XDG_RUNTIME_DIR"] = cand
-                        break
-            if "XDG_RUNTIME_DIR" in env:
-                pulse_sock = os.path.join(env["XDG_RUNTIME_DIR"], "pulse", "native")
-                if os.path.exists(pulse_sock):
-                    env["PULSE_SERVER"] = f"unix:{pulse_sock}"
             try:
                 cmd = [
                     "parec",
                     "--rate=22050",
                     "--format=s16le",
                     "--channels=1",
-                    "--latency-msec=10",
-                    "--process-time-msec=10"
+                    "--latency-msec=20",
+                    "--process-time-msec=20"
                 ]
                 self.audio_tap_proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
-                    env=env
+                    env=self.audio_env
                 )
                 threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_tap_proc, True), daemon=True).start()
             except Exception as e:
                 logging.warning(f"Could not start parec audio tap: {e}")
+        else:
+            if self.audio_proc and self.audio_proc.stdout:
+                threading.Thread(target=self._audio_spectrum_reader, args=(self.audio_proc, False), daemon=True).start()
 
     def _audio_spectrum_reader(self, proc: subprocess.Popen, is_tap: bool = False):
         if not proc or not proc.stdout:
             return
 
-        fd = proc.stdout.fileno()
-        try:
-            fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-            fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
-        except Exception:
-            pass
+        chunk_size = 1024  # 512 samples (~23.2ms) for optimal 43 FPS visualizer cadence
+        chunk_duration = (chunk_size // 2) / 22050.0
 
-        chunk_size = 1024  # 512 samples (~23.2ms)
-        last_chunk = b""
+        # Audio DAC hardware / ring buffer delay compensation only when reading ahead from ffmpeg
+        if not is_tap:
+            time.sleep(0.35)
+            next_chunk_time = time.time()
 
         try:
             while proc and proc.poll() is None and self.is_playing:
-                # Read all pending data from the pipe buffer up to 16KB to eliminate any backlog
-                drained = b""
-                while True:
-                    try:
-                        part = os.read(fd, 4096)
-                        if not part:
-                            break
-                        drained += part
-                        if len(drained) > 16384:
-                            drained = drained[-4096:]  # Keep only the very latest samples
-                    except (BlockingIOError, InterruptedError):
-                        break
+                data = proc.stdout.read(chunk_size)
+                if not data:
+                    break
+                self.visualizer.feed_pcm(data)
 
-                if drained:
-                    last_chunk = (last_chunk + drained)[-chunk_size:]
-                    if len(last_chunk) >= 512:
-                        self.visualizer.feed_pcm(last_chunk)
-
-                time.sleep(0.015)  # Fast 66 FPS polling rate matching 60Hz display refresh
+                # Pace the reader only if not a blocking hardware tap (pipe needs pacing, tap blocks naturally)
+                if not is_tap:
+                    next_chunk_time += chunk_duration
+                    sleep_time = next_chunk_time - time.time()
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+                    elif sleep_time < -0.15:
+                        next_chunk_time = time.time()
         except Exception:
             pass
         finally:
@@ -2087,7 +2082,7 @@ class SNfetchDashboard:
                     self.current_idx = idx
                     self.cursor_idx = idx
 
-                    if shutil.which("ffmpeg"):
+                    if self.platform.audio_pipeline == AudioPipeline.FFMPEG_STDOUT_SPLIT and shutil.which("ffmpeg"):
                         cmd = [
                             "ffmpeg", "-y",
                             "-i", str(jingle_path),
@@ -2097,7 +2092,8 @@ class SNfetchDashboard:
                         ]
                         stdout_mode = subprocess.PIPE
                     elif shutil.which("mpv"):
-                        cmd = ["mpv", "--no-video", "--no-terminal", "--audio-fallback-to-null=yes", str(jingle_path)]
+                        ao_arg = "--ao=pulse,alsa" if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP else "--ao=alsa"
+                        cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-fallback-to-null=yes", str(jingle_path)]
                         stdout_mode = subprocess.DEVNULL
                     else:
                         cmd = ["aplay", "-q", str(jingle_path)]
@@ -2106,7 +2102,7 @@ class SNfetchDashboard:
                     with self._audio_lock:
                         if self.state != STATE_RADIO or self._resolve_id != req_id:
                             return
-                        self.audio_proc = subprocess.Popen(cmd, stdout=stdout_mode, stderr=subprocess.DEVNULL)
+                        self.audio_proc = subprocess.Popen(cmd, stdout=stdout_mode, stderr=subprocess.DEVNULL, env=self.audio_env)
                         self.is_playing = True
                     self.playback_start_time = time.time()
                     self.track_duration = 12.0
@@ -2172,7 +2168,7 @@ class SNfetchDashboard:
                 self.cursor_idx = idx
                 self._update_quote()
 
-                if shutil.which("ffmpeg"):
+                if self.platform.audio_pipeline == AudioPipeline.FFMPEG_STDOUT_SPLIT and shutil.which("ffmpeg"):
                     reconnect_args = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"] if str(stream_url).startswith("http") else []
                     cmd = [
                         "ffmpeg", "-y",
@@ -2184,7 +2180,8 @@ class SNfetchDashboard:
                     ]
                     stdout_mode = subprocess.PIPE
                 elif shutil.which("mpv"):
-                    cmd = ["mpv", "--no-video", "--no-terminal", "--audio-fallback-to-null=yes", stream_url]
+                    ao_arg = "--ao=pulse,alsa" if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP else "--ao=alsa"
+                    cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-fallback-to-null=yes", stream_url]
                     stdout_mode = subprocess.DEVNULL
                 else:
                     cmd = ["aplay", "-q", stream_url]
@@ -2193,7 +2190,7 @@ class SNfetchDashboard:
                 with self._audio_lock:
                     if self.state != STATE_RADIO or self._resolve_id != req_id:
                         return
-                    self.audio_proc = subprocess.Popen(cmd, stdout=stdout_mode, stderr=subprocess.DEVNULL)
+                    self.audio_proc = subprocess.Popen(cmd, stdout=stdout_mode, stderr=subprocess.DEVNULL, env=self.audio_env)
                     self.is_playing = True
                     self._trigger_prefetch_next_track(idx, is_tv=False)
                 self.playback_start_time = time.time()
@@ -2747,8 +2744,8 @@ class SNfetchDashboard:
             self.stop_chronicles_audio()
             try:
                 if shutil.which("mpv"):
-                    cmd = ["mpv", "--no-video", "--really-quiet", "--no-terminal", str(target_path)]
-                    self.chronicles_proc = subprocess.Popen(cmd)
+                    cmd = ["mpv", "--ao=pulse,alsa", "--no-video", "--really-quiet", "--no-terminal", str(target_path)]
+                    self.chronicles_proc = subprocess.Popen(cmd, env=self.audio_env)
                     self.chronicles_playing = True
                     logging.info(f"Chronicles playback started with mpv: {target_path.name}")
                 elif shutil.which("ffplay"):
