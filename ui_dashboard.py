@@ -348,16 +348,60 @@ class HardwareManager:
                 pass
 
         if shutil.which("amixer"):
-            try:
-                res = subprocess.run(["amixer", "sget", "Playback"], capture_output=True, text=True, timeout=0.6)
-                for line in res.stdout.splitlines():
-                    if "[" in line and "%]" in line:
-                        part = line.split("[")[1].split("%]")[0]
-                        if part.isdigit():
-                            return int(part)
-            except Exception:
-                pass
+            for ctrl in ["Master", "Playback"]:
+                try:
+                    res = subprocess.run(["amixer", "sget", ctrl], capture_output=True, text=True, timeout=0.6)
+                    for line in res.stdout.splitlines():
+                        if "[" in line and "%]" in line:
+                            part = line.split("[")[1].split("%]")[0]
+                            if part.isdigit():
+                                return int(part)
+                except Exception:
+                    pass
         return 80
+
+    @staticmethod
+    def start_adc_volume_listener(callback: Callable[[int], None]):
+        """Hardware volume listener for RK3326 / R36S ADC resistor ladder rocker on Channel 2."""
+        adc_file = Path("/sys/bus/iio/devices/iio:device0/in_voltage2_raw")
+        if not adc_file.exists():
+            return None
+
+        stop_event = threading.Event()
+
+        def _worker():
+            last_trigger_time = 0.0
+            press_start_time = 0.0
+            active_dir = 0
+            while not stop_event.is_set():
+                try:
+                    with open(adc_file, "r") as f:
+                        raw = int(f.read().strip())
+                    now = time.time()
+                    # Idle / Released is ~1019..1024
+                    if raw > 700:
+                        active_dir = 0
+                        press_start_time = 0.0
+                    else:
+                        # Raw < 60 is Volume UP (~0); Raw 100..500 is Volume DOWN (~170..330)
+                        direction = +5 if raw < 60 else -5
+                        if active_dir != direction:
+                            active_dir = direction
+                            press_start_time = now
+                            last_trigger_time = now
+                            callback(direction)
+                        else:
+                            held_duration = now - press_start_time
+                            if held_duration > 0.30 and (now - last_trigger_time) > 0.16:
+                                last_trigger_time = now
+                                callback(direction)
+                except Exception:
+                    pass
+                time.sleep(0.04)
+
+        t = threading.Thread(target=_worker, daemon=True, name="ADCVolumeListener")
+        t.start()
+        return stop_event
 
     @staticmethod
     def adjust_volume(delta: int) -> int:
@@ -946,7 +990,9 @@ class SNfetchDashboard:
         # Global Volume OSD Feedback
         self.volume_osd_visible: bool = False
         self.volume_osd_time: float = 0.0
-        self.volume_osd_val: int = 80
+        self.volume_osd_val: int = self.hardware.get_master_volume()
+        self._last_vol_change_time: float = 0.0
+        self._stop_adc_listener = self.hardware.start_adc_volume_listener(self._trigger_volume_change)
 
         # Load default Radio Playlist
         self._load_active_playlist(is_tv=False)
@@ -4009,6 +4055,10 @@ class SNfetchDashboard:
     # GLOBAL HARDWARE VOLUME OSD HUD
     # =========================================================================
     def _trigger_volume_change(self, delta: int):
+        now = time.time()
+        if now - getattr(self, "_last_vol_change_time", 0.0) < 0.08:
+            return
+        self._last_vol_change_time = now
         new_v = self.hardware.adjust_volume(delta)
         self.volume_osd_visible = True
         self.volume_osd_time = time.time()
@@ -4412,6 +4462,8 @@ class SNfetchDashboard:
             # Universal PortMaster Kill: SELECT (Tab) + START (P)
             keys = pygame.key.get_pressed()
             if (keys[pygame.K_TAB] and keys[pygame.K_p]) or (keys[pygame.K_p] and keys[pygame.K_TAB]):
+                if hasattr(self, "_stop_adc_listener") and self._stop_adc_listener:
+                    self._stop_adc_listener.set()
                 self.stop_audio()
                 self.stop_chronicles_audio()
                 pygame.quit()
@@ -4502,6 +4554,8 @@ class SNfetchDashboard:
 
             pygame.display.flip()
 
+        if hasattr(self, "_stop_adc_listener") and self._stop_adc_listener:
+            self._stop_adc_listener.set()
         self.stop_audio()
         self.stop_chronicles_audio()
         pygame.quit()
