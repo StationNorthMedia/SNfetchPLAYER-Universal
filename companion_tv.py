@@ -2,10 +2,11 @@
 """
 Station North SNfetchPLAYER - Minimalist TV Video Companion (PC Edition)
 Option A Architecture:
-- Pure Video-Only Window (MpvGLWidget with Zero-Copy OpenGL Framebuffer Injection)
-- Auto-Hiding Floating Cockpit (5 Pastel Buttons: [ ], |◄, ||, ►|, ✕)
-- Wakes up on start and on mouse move / key press; auto-hides after 3.5s
-- Seamless Fullscreen Toggle ([ ] / ><) and instant return to Pygame (✕ / ESC / B)
+- Fixed 1024x768 (4:3) Windowed Mode with pan-and-scan (zero black bars, full bleed)
+- Seamless 16:9 Widescreen Fullscreen Toggle ([ ] / ><) with uncropped video
+- Proportional vector-smooth Logo watermark scaling across all resolutions
+- Classic MTV-Style Lower Third (Bauchbinde) appearing for 6s on track start
+- Sleek 5-Button Pastel Cockpit (Pure Pygame Style) with 3.5s auto-hide and hover-pause
 - Bidirectional JSON-IPC over stdin / stdout with standalone fallback
 """
 
@@ -38,14 +39,17 @@ NORD3 = "#4c566a"
 NORD4 = "#d8dee9"
 NORD6 = "#eceff4"
 NORD7 = "#8fbcbb"   # Mint ([ ] Fullscreen)
-NORD8 = "#88c0d0"   # Frost Cyan (Artist/Accent)
-NORD9 = "#81a1c1"   # Arctic Blue (Play/Pause)
-NORD11 = "#bf616a"  # Red (Alert)
+NORD8 = "#88c0d0"   # Frost Cyan (Accent / Title)
+NORD9 = "#81a1c1"   # Arctic Blue (Play / Pause)
+NORD11 = "#bf616a"  # Red
 NORD12 = "#d08770"  # Peach (|◄ Prev)
-NORD13 = "#ebcb8b"  # Gold (✕ Close/Deck)
+NORD13 = "#ebcb8b"  # Gold (✕ Close / Deck)
 NORD15 = "#b48ead"  # Lavender (►| Next)
 
 APP_DIR = Path(__file__).resolve().parent
+FIXED_WINDOW_W = 1024
+FIXED_WINDOW_H = 768
+
 
 # OpenGL proc address callback for libmpv
 @mpv.MpvGlGetProcAddressFn
@@ -59,7 +63,7 @@ def _c_get_proc_address(ctx, name):
 
 
 class MpvGLWidget(QOpenGLWidget):
-    """Native Qt OpenGL Widget rendering libmpv directly into Qt Framebuffer (Zero-Copy)."""
+    """Native Qt OpenGL Widget rendering libmpv directly into Qt Framebuffer."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.mpv_player = mpv.MPV(
@@ -70,21 +74,18 @@ class MpvGLWidget(QOpenGLWidget):
         )
         self.render_ctx = None
 
-        # Subtle station watermark in bottom-right corner of video
-        self.watermark = QtWidgets.QLabel(self)
-        self.watermark.setStyleSheet("background: transparent;")
+        # Master Logo for proportional scaling
+        self.master_logo: QPixmap = QPixmap()
         logo_path = APP_DIR / "assets/sn_logo_overlay.png"
         if not logo_path.exists():
             logo_path = APP_DIR / "sn_logo.png"
         if logo_path.exists():
-            pix = QPixmap(str(logo_path)).scaled(
-                68, 42,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.watermark.setPixmap(pix)
-            self.watermark.setFixedSize(pix.size())
-        else:
+            self.master_logo = QPixmap(str(logo_path))
+
+        # Station watermark label in bottom-right corner of video
+        self.watermark = QtWidgets.QLabel(self)
+        self.watermark.setStyleSheet("background: transparent;")
+        if self.master_logo.isNull():
             self.watermark.setText("SN")
             self.watermark.setStyleSheet("color: rgba(236, 239, 244, 0.65); font-weight: bold; font-size: 14px;")
 
@@ -106,10 +107,27 @@ class MpvGLWidget(QOpenGLWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Position watermark 18px from right and bottom
-        wm_w = self.watermark.width()
-        wm_h = self.watermark.height()
-        self.watermark.move(self.width() - wm_w - 18, self.height() - wm_h - 18)
+        self.reposition_watermark()
+
+    def reposition_watermark(self):
+        vw = self.width()
+        vh = self.height()
+        if not self.master_logo.isNull():
+            # Dynamically scale logo proportional to window height (~6.5% of height)
+            logo_h = max(34, int(vh * 0.065))
+            logo_w = int(logo_h * (self.master_logo.width() / self.master_logo.height()))
+            scaled = self.master_logo.scaled(
+                logo_w, logo_h,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.watermark.setPixmap(scaled)
+            self.watermark.setFixedSize(scaled.size())
+            margin_x = max(16, int(vw * 0.025))
+            margin_y = max(16, int(vh * 0.035))
+            self.watermark.move(vw - scaled.width() - margin_x, vh - scaled.height() - margin_y)
+        else:
+            self.watermark.move(vw - 50, vh - 40)
         self.watermark.raise_()
 
     def closeEvent(self, event):
@@ -152,17 +170,15 @@ class IPCBridge(QObject):
 
 class MinimalistTVWindow(QtWidgets.QMainWindow):
     """
-    Pure Video-Only Window:
-    - Entire central area is MpvGLWidget.
-    - Floating Cockpit OSD auto-hides after 3.5s.
-    - [ ] toggles Fullscreen / Windowed.
-    - ✕ closes window and returns to Pygame.
+    Station North Minimalist TV Window:
+    - Fixed 1024x768 4:3 windowed mode with pan & scan (zero black bars).
+    - Uncropped 16:9 fullscreen with proportional watermark.
+    - MTV-style Lower Third (Bauchbinde) on track start (6s auto-fade).
+    - Pure 5-Button Pastel Cockpit with 3.5s auto-hide.
     """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Station North • TV Player")
-        self.resize(1024, 576)
-        self.setMinimumSize(640, 360)
+        self.setWindowTitle("Station North • Television Broadcast")
         self.setStyleSheet(f"background-color: {NORD0}; color: {NORD6};")
 
         self.bridge = IPCBridge()
@@ -178,6 +194,9 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
 
         self.init_ui()
 
+        # Lock to fixed 1024x768 in windowed mode
+        self.apply_windowed_fixed_size()
+
         # Listen for EOF property in MPV
         @self.video_widget.mpv_player.property_observer('eof-reached')
         def _on_eof_observer(name, value):
@@ -189,9 +208,15 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
         self.ipc_thread.start()
 
         self._send_event({"event": "ready"})
-
-        # Load standalone playlist as fallback
         self._load_standalone_playlist()
+
+    def apply_windowed_fixed_size(self):
+        """Sets fixed 1024x768 size and 4:3 pan & scan cropping in windowed mode."""
+        self.setMinimumSize(FIXED_WINDOW_W, FIXED_WINDOW_H)
+        self.setMaximumSize(FIXED_WINDOW_W, FIXED_WINDOW_H)
+        self.resize(FIXED_WINDOW_W, FIXED_WINDOW_H)
+        # Pan & Scan = 1.0 crops left/right to fill 4:3 container with zero black bars
+        self.video_widget.mpv_player.panscan = 1.0
 
     def _load_standalone_playlist(self):
         pl_candidates = [
@@ -211,11 +236,41 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
                     pass
 
     def init_ui(self):
-        # 1. Video Widget is the ONLY central widget (100% video display)
+        # 1. Video Widget is the central widget (100% video display)
         self.video_widget = MpvGLWidget(self)
         self.setCentralWidget(self.video_widget)
 
-        # 2. Floating Cockpit Card (Overlaid as a child of video_widget)
+        # 2. Classic MTV-Style Lower Third (Bauchbinde) in Bottom-Left Corner
+        self.lower_third = QtWidgets.QFrame(self.video_widget)
+        self.lower_third.setObjectName("LowerThird")
+        self.lower_third.setStyleSheet(f"""
+            QFrame#LowerThird {{
+                background-color: rgba(20, 26, 38, 0.90);
+                border: 1px solid rgba(76, 86, 106, 0.85);
+                border-left: 5px solid {NORD8};
+                border-radius: 12px;
+            }}
+        """)
+        lt_layout = QtWidgets.QVBoxLayout(self.lower_third)
+        lt_layout.setContentsMargins(14, 8, 16, 8)
+        lt_layout.setSpacing(3)
+
+        self.lt_artist = QtWidgets.QLabel(self.current_artist, self.lower_third)
+        self.lt_artist.setStyleSheet(f"color: {NORD6}; font-size: 15px; font-weight: bold; border: none;")
+        lt_layout.addWidget(self.lt_artist)
+
+        self.lt_title = QtWidgets.QLabel(f"{self.current_title} • Television Broadcast", self.lower_third)
+        self.lt_title.setStyleSheet(f"color: {NORD8}; font-size: 12px; font-weight: bold; border: none;")
+        lt_layout.addWidget(self.lt_title)
+
+        self.lower_third.adjustSize()
+        self.lower_third.hide()
+
+        self.lower_third_timer = QTimer(self)
+        self.lower_third_timer.setInterval(6000)
+        self.lower_third_timer.timeout.connect(self.lower_third.hide)
+
+        # 3. Floating 5-Button Pastel Cockpit (Pure Pygame Style)
         self.cockpit = HoverAwareCockpit(
             self.video_widget,
             on_enter=self._on_cockpit_hover_enter,
@@ -229,40 +284,18 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
                 border-radius: 18px;
             }}
         """)
-        cockpit_layout = QtWidgets.QVBoxLayout(self.cockpit)
-        cockpit_layout.setContentsMargins(18, 10, 18, 10)
-        cockpit_layout.setSpacing(6)
-
-        # Header inside Cockpit: Title • Artist
-        meta_row = QtWidgets.QHBoxLayout()
-        meta_row.setSpacing(8)
-
-        self.lbl_title = QtWidgets.QLabel(self.current_title, self.cockpit)
-        self.lbl_title.setStyleSheet(f"color: {NORD6}; font-size: 17px; font-weight: bold; border: none;")
-        meta_row.addWidget(self.lbl_title)
-
-        lbl_sep = QtWidgets.QLabel("•", self.cockpit)
-        lbl_sep.setStyleSheet(f"color: {NORD3}; font-size: 14px; font-weight: bold; border: none;")
-        meta_row.addWidget(lbl_sep)
-
-        self.lbl_artist = QtWidgets.QLabel(self.current_artist, self.cockpit)
-        self.lbl_artist.setStyleSheet(f"color: {NORD8}; font-size: 14px; font-weight: bold; border: none;")
-        meta_row.addWidget(self.lbl_artist, stretch=1)
-
-        cockpit_layout.addLayout(meta_row)
-
-        # 5 Pastel Cockpit Buttons
-        btn_row = QtWidgets.QHBoxLayout()
-        btn_row.setSpacing(10)
+        cockpit_layout = QtWidgets.QHBoxLayout(self.cockpit)
+        cockpit_layout.setContentsMargins(14, 8, 14, 8)
+        cockpit_layout.setSpacing(10)
 
         def make_cockpit_btn(label, bg_color):
             b = QtWidgets.QPushButton(label, self.cockpit)
-            b.setFixedHeight(42)
+            b.setFixedHeight(44)
             b.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {bg_color};
                     color: {NORD0};
-                    font-size: 16px;
+                    font-size: 17px;
                     font-weight: bold;
                     border: none;
                     border-radius: 10px;
@@ -275,35 +308,33 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
 
         # 1: Fullscreen [ ] / ><
         self.btn_fs = make_cockpit_btn("[ ]", NORD7)
-        self.btn_fs.setToolTip("Toggle Fullscreen / Windowed")
+        self.btn_fs.setToolTip("Toggle Fullscreen (16:9) / Windowed (4:3)")
         self.btn_fs.clicked.connect(self.toggle_fullscreen)
-        btn_row.addWidget(self.btn_fs)
+        cockpit_layout.addWidget(self.btn_fs)
 
         # 2: Prev |◄
         self.btn_prev = make_cockpit_btn("|◄", NORD12)
         self.btn_prev.setToolTip("Previous Track")
         self.btn_prev.clicked.connect(self.on_prev_clicked)
-        btn_row.addWidget(self.btn_prev)
+        cockpit_layout.addWidget(self.btn_prev)
 
         # 3: Play / Pause ||
         self.btn_play = make_cockpit_btn("||", NORD9)
         self.btn_play.setToolTip("Pause / Resume Video")
         self.btn_play.clicked.connect(self.toggle_pause)
-        btn_row.addWidget(self.btn_play)
+        cockpit_layout.addWidget(self.btn_play)
 
         # 4: Next ►|
         self.btn_next = make_cockpit_btn("►|", NORD15)
         self.btn_next.setToolTip("Next Track")
         self.btn_next.clicked.connect(self.on_next_clicked)
-        btn_row.addWidget(self.btn_next)
+        cockpit_layout.addWidget(self.btn_next)
 
         # 5: Close / Deck ✕ (Pastel Gold)
         self.btn_close = make_cockpit_btn("✕", NORD13)
         self.btn_close.setToolTip("Close TV / Back to Pygame Deck")
         self.btn_close.clicked.connect(self.on_deck_return)
-        btn_row.addWidget(self.btn_close)
-
-        cockpit_layout.addLayout(btn_row)
+        cockpit_layout.addWidget(self.btn_close)
 
         # Mouse tracking & Auto-hide timer
         self.setMouseTracking(True)
@@ -317,26 +348,34 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
         self.wake_cockpit()
 
     def _on_cockpit_hover_enter(self):
-        # Pause auto-hide timer while user hovers over cockpit buttons
         self.hide_timer.stop()
 
     def _on_cockpit_hover_leave(self):
-        # Restart auto-hide timer when user leaves cockpit area
         self.hide_timer.start(3500)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.reposition_cockpit()
+        self.reposition_overlays()
 
-    def reposition_cockpit(self):
+    def reposition_overlays(self):
         vw = self.video_widget.width()
         vh = self.video_widget.height()
-        w = min(620, vw - 40)
-        h = 96
+
+        # 1. Reposition Cockpit (Bottom Center)
+        w = min(560, vw - 40)
+        h = 60
         x = (vw - w) // 2
         y = vh - h - 22
         self.cockpit.setGeometry(x, y, w, h)
         self.cockpit.raise_()
+
+        # 2. Reposition Lower Third (Bottom Left, elevated above cockpit line)
+        lt_w = min(420, max(280, int(vw * 0.38)))
+        lt_h = 58
+        lt_x = max(24, int(vw * 0.03))
+        lt_y = vh - h - 22 - lt_h - 14
+        self.lower_third.setGeometry(lt_x, lt_y, lt_w, lt_h)
+        self.lower_third.raise_()
 
     def mouseMoveEvent(self, event):
         self.wake_cockpit()
@@ -365,18 +404,34 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
         super().keyPressEvent(event)
 
     def wake_cockpit(self):
-        self.reposition_cockpit()
+        self.reposition_overlays()
         self.cockpit.show()
         self.cockpit.raise_()
         self.hide_timer.start(3500)
 
+    def show_lower_third(self):
+        self.lt_artist.setText(self.current_artist)
+        self.lt_title.setText(f"{self.current_title} • Television Broadcast")
+        self.reposition_overlays()
+        self.lower_third.show()
+        self.lower_third.raise_()
+        self.lower_third_timer.start(6000)
+
     def toggle_fullscreen(self):
         if self.isFullScreen():
+            # Exit fullscreen back to fixed 1024x768 4:3 pan & scan
             self.showNormal()
+            self.apply_windowed_fixed_size()
             self.btn_fs.setText("[ ]")
         else:
+            # Enter Fullscreen: Unlock constraints and switch to 16:9 uncropped
+            self.setMinimumSize(0, 0)
+            self.setMaximumSize(16777215, 16777215)
             self.showFullScreen()
+            # In 16:9 Fullscreen, panscan = 0.0 gives full native widescreen without cropping
+            self.video_widget.mpv_player.panscan = 0.0
             self.btn_fs.setText("><")
+
         self.wake_cockpit()
 
     def toggle_pause(self):
@@ -391,7 +446,7 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
 
     def on_deck_return(self):
         if self.isFullScreen():
-            self.showNormal()
+            self.toggle_fullscreen()
         self._send_event({"event": "return_to_deck"})
         self.hide()
 
@@ -424,8 +479,6 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
     def play_url(self, url: str, title: str = "", artist: str = ""):
         self.current_title = title or "Broadcast Stream"
         self.current_artist = artist or "Station North"
-        self.lbl_title.setText(self.current_title)
-        self.lbl_artist.setText(self.current_artist)
         self.btn_play.setText("||")
 
         self.video_widget.mpv_player.play(url)
@@ -434,7 +487,11 @@ class MinimalistTVWindow(QtWidgets.QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
+
+        # Wake Cockpit & show broadcast Lower Third for 6 seconds
         self.wake_cockpit()
+        self.show_lower_third()
+
         self._send_event({"event": "playback_started", "title": self.current_title})
 
     def on_track_eof(self):
