@@ -1184,18 +1184,21 @@ class SNfetchDashboard:
             cx, cy = radius, radius
             label_r = int(radius * 0.35)
 
-            # 1. Anisotropic Sheen Surface (fixed at 2 o'clock / 325° and 8 o'clock / 145°)
+            # 1. Silky Smooth Anisotropic Sheen Surface (starting at 2 o'clock / 325° and 8 o'clock / 145°)
             sheen_surf = pygame.Surface((full_size, full_size), pygame.SRCALPHA)
             for angle_center in (325, 145):
-                for d_deg in range(-24, 25):
-                    fact = 1.0 - (abs(d_deg) / 24.0) ** 1.6
-                    alpha = int(24 * fact)
-                    rad = math.radians(angle_center + d_deg)
+                for deg_10 in range(-280, 281, 2):  # -28° to +28° in 0.2° steps (ultra smooth, no discrete stripes)
+                    deg = deg_10 / 10.0
+                    fact = math.cos(math.radians(deg / 28.0 * 90.0)) ** 1.8
+                    alpha = int(38 * fact)
+                    if alpha <= 0:
+                        continue
+                    rad = math.radians(angle_center + deg)
                     sx = cx + math.cos(rad) * (label_r + 2)
                     sy = cy + math.sin(rad) * (label_r + 2)
-                    ex = cx + math.cos(rad) * (radius - 4)
-                    ey = cy + math.sin(rad) * (radius - 4)
-                    pygame.draw.line(sheen_surf, (200, 230, 255, alpha), (sx, sy), (ex, ey), 4)
+                    ex = cx + math.cos(rad) * (radius - 3)
+                    ey = cy + math.sin(rad) * (radius - 3)
+                    pygame.draw.line(sheen_surf, (210, 235, 255, alpha), (sx, sy), (ex, ey), 3)
 
             # 2. Base Disc Surface that rotates
             base_disc = pygame.Surface((full_size, full_size), pygame.SRCALPHA)
@@ -1235,6 +1238,9 @@ class SNfetchDashboard:
             pygame.draw.circle(base_disc, (16, 20, 26), (cx, cy), 13)
             pygame.draw.circle(base_disc, NORD4, (cx, cy), 13, width=2)
 
+            # Bake the luminous sheen onto the disc so it rotates with the vinyl!
+            base_disc.blit(sheen_surf, (0, 0), special_flags=pygame.BLEND_ADD)
+
             # 3. Pre-render 36 upper-half frames (10° per frame)
             self._vinyl_frames = []
             for deg in range(0, 360, 10):
@@ -1242,7 +1248,6 @@ class SNfetchDashboard:
                 frame = pygame.Surface((full_size, radius), pygame.SRCALPHA)
                 r_rect = rot_disc.get_rect(center=(cx, radius))
                 frame.blit(rot_disc, r_rect.topleft)
-                frame.blit(sheen_surf, (0, 0), special_flags=pygame.BLEND_ADD)
                 self._vinyl_frames.append(frame)
         except Exception as e:
             logging.error(f"Failed to init radio vinyl record: {e}")
