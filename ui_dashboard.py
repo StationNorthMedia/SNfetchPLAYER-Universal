@@ -2120,6 +2120,10 @@ class SNfetchDashboard:
                 return
 
             if player_bin == "mpv":
+                watermark_file = APP_DIR / "sn_logo_watermark.png"
+                if not watermark_file.exists():
+                    watermark_file = Path("sn_logo_watermark.png").resolve()
+
                 cmd = [
                     "mpv",
                     "--fullscreen",
@@ -2133,8 +2137,13 @@ class SNfetchDashboard:
                     "--force-window=yes",
                     f"--sub-file={osd_file}",
                     f"--title=STATION NORTH • {track_artist} - {track_title}",
-                    stream_url,
                 ]
+                if watermark_file.exists():
+                    cmd.extend([
+                        f"--external-file={str(watermark_file)}",
+                        "--lavfi-complex=[vid1][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
+                    ])
+                cmd.append(stream_url)
 
             try:
                 pygame.display.quit()
@@ -2308,6 +2317,10 @@ class SNfetchDashboard:
             return True
 
         if player_bin == "mpv":
+            watermark_file = APP_DIR / "sn_logo_watermark.png"
+            if not watermark_file.exists():
+                watermark_file = Path("sn_logo_watermark.png").resolve()
+
             cmd = [
                 "mpv",
                 "--fullscreen",
@@ -2320,8 +2333,13 @@ class SNfetchDashboard:
                 "--keep-open=no",
                 "--force-window=yes",
                 "--title=STATION NORTH TV IDENT",
-                str(clip_path),
             ]
+            if watermark_file.exists():
+                cmd.extend([
+                    f"--external-file={str(watermark_file)}",
+                    "--lavfi-complex=[vid1][vid2] overlay=main_w-overlay_w-30:main_h-overlay_h-26 [vo]"
+                ])
+            cmd.append(str(clip_path))
         else:
             cmd = [
                 "ffplay",
