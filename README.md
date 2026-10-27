@@ -64,6 +64,7 @@ Station North was designed to turn your retro gaming handheld or Linux PC into a
 | **03 • Radio Stage (Vinyl & Spectrum Analyzer)**<br><a href="screenshots/03_radio_dashboard.png"><img src="screenshots/03_radio_dashboard.png" width="460" alt="Radio Dashboard" /></a><br><i>Real-time audio visualizer, dynamic active playlist branding & 5-button cockpit.</i> | **04 • Radio Zen Mode (Ambient Fullscreen)**<br><a href="screenshots/04_radio_zen_fullscreen.png"><img src="screenshots/04_radio_zen_fullscreen.png" width="460" alt="Zen Fullscreen" /></a><br><i>Full 440px spectrum analyzer, turntable, clock & glowing playlist badge.</i> |
 | **05 • TV Studio Deck (Frosted CRT Monitor)**<br><a href="screenshots/05_tv_dashboard.png"><img src="screenshots/05_tv_dashboard.png" width="460" alt="TV Studio Deck" /></a><br><i>Frosted glass overlay, active TV playlist, telemetry tag & 5-button deck cockpit.</i> | **06 • TV Fullscreen (4:3 CRT Broadcast)**<br><a href="screenshots/06_tv_video_fullscreen.png"><img src="screenshots/06_tv_video_fullscreen.png" width="460" alt="TV Fullscreen" /></a><br><i>Top-Right MTV-style Lower Third, doubled watermark logo & zero-latency video.</i> |
 | **07 • The Chronicles (Voiced Audio Comics)**<br><a href="screenshots/07_the_chronicles.png"><img src="screenshots/07_the_chronicles.png" width="460" alt="The Chronicles" /></a><br><i>Deep-black comic canvas with voiceover player & 21px legible story text.</i> | **08 • System Deck & Interactive Handbook**<br><a href="screenshots/08_settings_handbook.png"><img src="screenshots/08_settings_handbook.png" width="460" alt="Settings Handbook" /></a><br><i>Channel playlist selector, volume mixer & scrollable on-device user manual.</i> |
+| **09 • PC Suite Mode (Studio Deck & Companion Video)**<br><a href="screenshots/09_pc_desktop_mode.png"><img src="screenshots/09_pc_desktop_mode.png" width="460" alt="PC Suite Mode" /></a><br><i>PyQt6 + libmpv OpenGL pipeline running on desktop Linux workstations.</i> | |
 
 ---
 
@@ -115,6 +116,10 @@ Two installation packages are available in [GitHub Releases](https://github.com/
 ### B. Linux PC Installation (Ubuntu, Debian, Pop!_OS, Arch, Fedora)
 
 Run Station North directly on your desktop or laptop with hardware OpenGL video acceleration:
+
+<p align="center">
+  <a href="screenshots/09_pc_desktop_mode.png"><img src="screenshots/09_pc_desktop_mode.png" width="100%" alt="Station North PC Suite Desktop Mode" /></a>
+</p>
 
 1. Clone the repository:
    ```bash
