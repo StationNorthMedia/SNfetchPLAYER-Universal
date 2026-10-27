@@ -1367,6 +1367,7 @@ class SNfetchDashboard:
 
         # Retro Radio Vinyl Record (pre-rendered 36 frames for zero-overhead rotation)
         self._vinyl_frames: List[pygame.Surface] = []
+        self._vinyl_zen_frames: List[pygame.Surface] = []
         self._init_radio_vinyl_record()
 
         self.splash_enter_time = time.time()
@@ -1579,6 +1580,108 @@ class SNfetchDashboard:
         except Exception as e:
             logging.error(f"Failed to init radio vinyl record: {e}")
             self._vinyl_frames = []
+
+    def _init_radio_zen_vinyl_record(self):
+        """Pre-renders 480px vinyl disc frames for Radio Zen Fullscreen mode with living light sheen."""
+        try:
+            radius = 480
+            full_size = radius * 2
+            cx, cy = radius, radius
+            label_r = int(radius * 0.35)
+            scale = radius / 340.0
+
+            # 1. Base Vinyl Disc with concentric grooves and song tracks
+            base_disc = pygame.Surface((full_size, full_size), pygame.SRCALPHA)
+            pygame.draw.circle(base_disc, (18, 22, 28), (cx, cy), radius)
+            pygame.draw.circle(base_disc, (28, 35, 46), (cx, cy), radius, width=4)
+            pygame.draw.circle(base_disc, (136, 192, 208, 140), (cx, cy), radius - 2, width=1)
+
+            groove_pcts = (0.97, 0.94, 0.91, 0.88, 0.85, 0.82, 0.79, 0.76, 0.73, 0.70, 0.67, 0.64, 0.61, 0.58, 0.55, 0.52, 0.49, 0.46, 0.43)
+            for r_pct in groove_pcts:
+                r_val = int(radius * r_pct)
+                w_line = 2 if r_pct in (0.91, 0.76, 0.61) else 1
+                col = (42, 52, 68) if w_line == 2 else (28, 36, 48)
+                pygame.draw.circle(base_disc, col, (cx, cy), r_val, width=w_line)
+
+            # 2. Rotating Center Label
+            raw_label = pygame.Surface((label_r * 2, label_r * 2), pygame.SRCALPHA)
+            lcx, lcy = label_r, label_r
+            pygame.draw.circle(raw_label, NORD8, (lcx, lcy), label_r)
+            pygame.draw.circle(raw_label, (100, 155, 175), (lcx, lcy), label_r, width=4)
+            pygame.draw.circle(raw_label, (60, 85, 100), (lcx, lcy), int(label_r * 0.88), width=1)
+            pygame.draw.circle(raw_label, (70, 95, 110), (lcx, lcy), int(label_r * 0.60), width=1)
+
+            font_label = self._load_font(int(26 * scale), bold=True)
+            txt1 = font_label.render("STATION NORTH", True, (46, 52, 64))
+            raw_label.blit(txt1, (lcx - txt1.get_width() // 2, lcy - int(60 * scale)))
+            font_sub = self._load_font(int(20 * scale), bold=True)
+            txt2 = font_sub.render("RADIO 33 RPM", True, (67, 76, 94))
+            raw_label.blit(txt2, (lcx - txt2.get_width() // 2, lcy + int(34 * scale)))
+
+            if self.logo_large:
+                try:
+                    lw = int(label_r * 0.90)
+                    lh = int(lw * (self.logo_large.get_height() / self.logo_large.get_width()))
+                    scaled_logo = pygame.transform.smoothscale(self.logo_large, (lw, lh))
+                    raw_label.blit(scaled_logo, scaled_logo.get_rect(center=(lcx, lcy)))
+                except Exception:
+                    pass
+
+            pygame.draw.circle(raw_label, (16, 20, 26), (lcx, lcy), int(16 * scale))
+            pygame.draw.circle(raw_label, NORD4, (lcx, lcy), int(16 * scale), width=2)
+            pygame.draw.circle(raw_label, (255, 255, 255), (lcx - 4, lcy - 4), 4)
+
+            # 3. Master 2D Light Sheen Spot scaled up to 480px vinyl
+            spot_w = int(198)
+            spot_h = int(325)
+            half_w = spot_w / 2.0
+            half_h = spot_h / 2.0
+            buf = bytearray(spot_w * spot_h * 4)
+            idx = 0
+            for y in range(spot_h):
+                ny = (y - half_h) / half_h
+                ny2 = ny * ny
+                for x in range(spot_w):
+                    nx = (x - half_w) / half_w
+                    dist2 = nx * nx + ny2
+                    if dist2 < 1.0:
+                        val = math.cos(math.sqrt(dist2) * math.pi * 0.5)
+                        alpha = int(28.0 * (val ** 1.3))
+                        buf[idx] = 215
+                        buf[idx + 1] = 235
+                        buf[idx + 2] = 255
+                        buf[idx + 3] = alpha
+                    idx += 4
+            spot_surf = pygame.image.frombuffer(bytes(buf), (spot_w, spot_h), 'RGBA')
+
+            r_mid = (label_r + radius) / 2.0
+            self._vinyl_zen_frames = []
+            for deg in range(0, 360, 10):
+                rad_t = math.radians(deg)
+                wobble_angle = math.sin(rad_t) * 8.0
+                wobble_intensity = 0.88 + 0.12 * math.cos(rad_t * 2.0)
+
+                frame = pygame.Surface((full_size, radius), pygame.SRCALPHA)
+                frame.blit(base_disc, (0, 0), area=pygame.Rect(0, 0, full_size, radius))
+
+                theta = 325.0 + wobble_angle
+                spot_cx = cx + math.cos(math.radians(theta)) * r_mid
+                spot_cy = cy + math.sin(math.radians(theta)) * r_mid
+
+                rot_spot = pygame.transform.rotate(spot_surf, -55.0 - wobble_angle)
+                rot_spot.set_alpha(int(255 * wobble_intensity))
+                spot_rect = rot_spot.get_rect(center=(int(spot_cx), int(spot_cy)))
+                frame.blit(rot_spot, spot_rect.topleft)
+
+                rot_label = pygame.transform.rotate(raw_label, -deg)
+                l_rect = rot_label.get_rect(center=(cx, radius))
+                frame.blit(rot_label, l_rect.topleft)
+
+                self._vinyl_zen_frames.append(frame)
+            logging.info(f"Initialized 480px Radio Zen vinyl record ({len(self._vinyl_zen_frames)} frames)")
+        except Exception as e:
+            logging.error(f"Failed to init radio zen vinyl record: {e}")
+            self._vinyl_zen_frames = []
 
 
     def _discover_playlists(self):
@@ -4540,13 +4643,18 @@ class SNfetchDashboard:
         """Full 1024x768 Zen Visualizer screen for ambient desk listening"""
         self.screen.fill(NORD0)
 
-        # 1. Fullscreen Visualizer across bottom 440px with retro spinning vinyl background
-        if hasattr(self, "_vinyl_frames") and self._vinyl_frames:
+        # 1. Fullscreen Visualizer across bottom 440px with retro spinning 480px vinyl background
+        if not hasattr(self, "_vinyl_zen_frames") or not self._vinyl_zen_frames:
+            self._init_radio_zen_vinyl_record()
+
+        zen_frames = self._vinyl_zen_frames if (hasattr(self, "_vinyl_zen_frames") and self._vinyl_zen_frames) else self._vinyl_frames
+        if zen_frames:
             if self.is_playing:
-                frame_idx = int((time.time() * 20.0) % len(self._vinyl_frames))
+                frame_idx = int((time.time() * 20.0) % len(zen_frames))
             else:
                 frame_idx = 0
-            self.screen.blit(self._vinyl_frames[frame_idx], (SCREEN_WIDTH // 2 - 340, 360))
+            r_zen = 480 if zen_frames is self._vinyl_zen_frames else 340
+            self.screen.blit(zen_frames[frame_idx], (SCREEN_WIDTH // 2 - r_zen, 700 - r_zen))
 
         self.visualizer.update(is_active=self.is_playing)
         self.visualizer.draw(self.screen, x=32, y=260, width=960, max_h=440)
