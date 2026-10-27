@@ -1723,7 +1723,12 @@ class SNfetchDashboard:
 
     def _load_quotes(self):
         self.quotes = []
-        for q_path in [APP_DIR / "sprueche.json", Path("sprueche.json")]:
+        for q_path in [
+            APP_DIR / "lore_quotes.json",
+            Path("lore_quotes.json"),
+            APP_DIR / "sprueche.json",
+            Path("sprueche.json")
+        ]:
             if q_path.exists():
                 try:
                     with open(q_path, "r", encoding="utf-8") as f:

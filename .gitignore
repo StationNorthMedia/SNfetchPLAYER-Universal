@@ -30,3 +30,9 @@ BUG_TRACKER.md
 DESIGN_IDEAS.md
 publish_to_github.sh
 SOURCE_SETUP.txt
+
+# Runtime media thumbnail cache
+thumbnails/*.jpg
+thumbnails/*.png
+thumbnails/*.webp
+!thumbnails/.gitkeep

@@ -30,7 +30,8 @@ cp "$SCRIPT_DIR/platform_detector.py" "$PKG_DIR/"
 cp "$SCRIPT_DIR/companion_tv.py" "$PKG_DIR/"
 cp "$SCRIPT_DIR/snfetchplayer.gptk" "$PKG_DIR/"
 cp "$SCRIPT_DIR/sn_logo.png" "$PKG_DIR/"
-cp "$SCRIPT_DIR/sprueche.json" "$PKG_DIR/"
+cp "$SCRIPT_DIR/lore_quotes.json" "$PKG_DIR/" 2>/dev/null || true
+cp "$SCRIPT_DIR/sprueche.json" "$PKG_DIR/" 2>/dev/null || true
 cp "$SCRIPT_DIR/playlist.json" "$PKG_DIR/"
 cp "$SCRIPT_DIR/port.json" "$PKG_DIR/"
 cp "$SCRIPT_DIR/gameinfo.xml" "$PKG_DIR/"
