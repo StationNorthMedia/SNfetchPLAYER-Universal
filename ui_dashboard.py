@@ -1611,16 +1611,16 @@ class SNfetchDashboard:
             pygame.draw.circle(raw_label, (60, 85, 100), (lcx, lcy), int(label_r * 0.88), width=1)
             pygame.draw.circle(raw_label, (70, 95, 110), (lcx, lcy), int(label_r * 0.60), width=1)
 
-            font_label = self._load_font(int(26 * scale), bold=True)
+            font_label = self._load_font(24, bold=True)
             txt1 = font_label.render("STATION NORTH", True, (46, 52, 64))
-            raw_label.blit(txt1, (lcx - txt1.get_width() // 2, lcy - int(60 * scale)))
-            font_sub = self._load_font(int(20 * scale), bold=True)
+            raw_label.blit(txt1, (lcx - txt1.get_width() // 2, lcy - 60))
+            font_sub = self._load_font(18, bold=True)
             txt2 = font_sub.render("RADIO 33 RPM", True, (67, 76, 94))
-            raw_label.blit(txt2, (lcx - txt2.get_width() // 2, lcy + int(34 * scale)))
+            raw_label.blit(txt2, (lcx - txt2.get_width() // 2, lcy + 36))
 
             if self.logo_large:
                 try:
-                    lw = int(label_r * 0.90)
+                    lw = int(label_r * 0.82)
                     lh = int(lw * (self.logo_large.get_height() / self.logo_large.get_width()))
                     scaled_logo = pygame.transform.smoothscale(self.logo_large, (lw, lh))
                     raw_label.blit(scaled_logo, scaled_logo.get_rect(center=(lcx, lcy)))
