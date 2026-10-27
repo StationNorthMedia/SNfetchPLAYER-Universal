@@ -821,20 +821,22 @@ class StationContentManager:
         self.tv_ids: List[Path] = []
         self.jingle_pool: List[Path] = []
         self.tv_id_pool: List[Path] = []
-        self.tracks_since_last_station = 0
         self.rotation_interval = 2
+        self.tracks_since_last_station = self.rotation_interval  # Active from first launch
         self._scan_station_assets()
 
     def _scan_station_assets(self):
-        base_dirs = [APP_DIR / "assets", Path("assets"), Path(".")]
+        base_dirs = [APP_DIR / "assets", Path("assets"), Path("assets").resolve(), Path("."), APP_DIR]
         for b in base_dirs:
-            j_dir = b / "jingles"
-            if j_dir.exists():
-                self.jingles = sorted(list(j_dir.glob("*.mp3")) + list(j_dir.glob("*.m4a")))
-            t_dir = b / "tv_ids"
-            if t_dir.exists():
-                self.tv_ids = sorted(list(t_dir.glob("*.mp4")) + list(t_dir.glob("*.mkv")))
-            if self.jingles or self.tv_ids:
+            if not self.jingles:
+                j_dir = b / "jingles"
+                if j_dir.exists():
+                    self.jingles = sorted(list(j_dir.glob("*.mp3")) + list(j_dir.glob("*.m4a")) + list(j_dir.glob("*.wav")) + list(j_dir.glob("*.ogg")))
+            if not self.tv_ids:
+                t_dir = b / "tv_ids"
+                if t_dir.exists():
+                    self.tv_ids = sorted(list(t_dir.glob("*.mp4")) + list(t_dir.glob("*.mkv")) + list(t_dir.glob("*.webm")))
+            if self.jingles and self.tv_ids:
                 break
 
     def should_play_station_content(self) -> bool:
@@ -2500,6 +2502,12 @@ class SNfetchDashboard:
     def _on_companion_event(self, data: dict):
         event = data.get("event")
         if event == "eof":
+            if self.is_station_drop:
+                self.is_station_drop = False
+                logging.info(f"TV Station ID finished. Playing scheduled track [{self.current_idx}]")
+                self.trigger_play_tv_track_async(self.current_idx)
+                return
+
             if self.state == STATE_TV and not self.shuffle_mgr.is_repeat_mode:
                 self.station_mgr.increment_counter()
                 next_idx = self.shuffle_mgr.advance_next()
@@ -2507,10 +2515,17 @@ class SNfetchDashboard:
             elif self.state == STATE_TV and self.shuffle_mgr.is_repeat_mode:
                 self.trigger_play_tv_track_async(self.current_idx)
         elif event == "request_next":
+            if self.is_station_drop:
+                self.is_station_drop = False
+                self.trigger_play_tv_track_async(self.current_idx)
+                return
             self.station_mgr.increment_counter()
             next_idx = self.shuffle_mgr.advance_next()
             self.trigger_play_tv_track_async(next_idx)
         elif event == "request_prev":
+            if self.is_station_drop:
+                self.is_station_drop = False
+            self.station_mgr.increment_counter()
             self.current_idx = self.shuffle_mgr.step_prev()
             self.trigger_play_tv_track_async(self.current_idx)
         elif event in ("paused", "resumed"):
@@ -2548,6 +2563,7 @@ class SNfetchDashboard:
             if self.direct_video_player:
                 self.direct_video_player.stop()
             self.is_tv_playing = False
+            self.is_station_drop = False
 
     def _start_audio_reader(self):
         if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP:
@@ -2705,6 +2721,7 @@ class SNfetchDashboard:
                     self.playback_start_time = time.time()
                     self.track_duration = 12.0
                     self._start_audio_reader()
+                    self._trigger_prefetch_next_track(idx, is_tv=False)
                     
                     proc = self.audio_proc
                     if proc:
@@ -2824,6 +2841,26 @@ class SNfetchDashboard:
                 return
             if self.state != STATE_TV or self._resolve_id != req_id:
                 return
+
+            # 2:1 Rotation Check for TV Station Ident Videos (unless Repeat mode is on)
+            if not self.shuffle_mgr.is_repeat_mode and not self.is_station_drop and self.station_mgr.should_play_station_content():
+                tv_id_path = self.station_mgr.get_next_tv_id()
+                if tv_id_path and tv_id_path.exists():
+                    self.station_mgr.reset_counter()
+                    self.is_station_drop = True
+                    self.station_drop_title = f"Station North TV • ID #{tv_id_path.stem}"
+                    self.current_idx = idx
+                    self.cursor_idx = idx
+                    self._update_quote()
+                    logging.info(f"TV Companion: Playing Station ID Bumper: {tv_id_path.name}")
+                    if self.tv_companion:
+                        self.tv_companion.play(str(tv_id_path.resolve()), self.station_drop_title, "STATION IDENT")
+                    elif self.direct_video_player:
+                        self.direct_video_player.play(str(tv_id_path.resolve()))
+                    self.is_tv_playing = True
+                    self.tv_track_start_time = time.time()
+                    self._trigger_prefetch_next_track(idx, is_tv=True)
+                    return
 
             track = self.playlist[idx]
             local_path = track.get("path") or track.get("file")
@@ -4902,11 +4939,13 @@ class SNfetchDashboard:
         pygame.draw.rect(self.screen, NORD1, (card2_x, card2_y, card2_w, card2_h), border_radius=16)
         pygame.draw.rect(self.screen, NORD2, (card2_x, card2_y, card2_w, card2_h), width=1, border_radius=16)
 
-        title_size = 20 if len(title) > 38 else 24
-        t_surf = self._render_cached_text(title, title_size, bold=True, color=NORD6)
+        disp_title = self.station_drop_title if self.is_station_drop else title
+        title_size = 20 if len(disp_title) > 38 else 24
+        t_surf = self._render_cached_text(disp_title, title_size, bold=True, color=NORD6)
         self.screen.blit(t_surf, (card2_x + 24, card2_y + 10))
 
-        a_surf = self._render_cached_text(f"{artist} • Television Broadcast", 16, bold=True, color=NORD4)
+        disp_artist = "The Queen's Frequency" if self.is_station_drop else artist
+        a_surf = self._render_cached_text(f"{disp_artist} • Television Broadcast", 16, bold=True, color=NORD4)
         self.screen.blit(a_surf, (card2_x + 24, card2_y + 36))
 
         # 5 Kompakte Cockpit-Buttons (Height = 62px)
@@ -4954,6 +4993,8 @@ class SNfetchDashboard:
             track = self.playlist[self.current_idx] if self.current_idx < len(self.playlist) else {}
             title = track.get("title", "Unknown Title")
             artist = track.get("artist", "The Queen's Frequency")
+            disp_title = self.station_drop_title if self.is_station_drop else title
+            disp_artist = "The Queen's Frequency" if self.is_station_drop else artist
             lt_w = 420
             lt_h = 58
             lt_x = SCREEN_WIDTH - lt_w - int(SCREEN_WIDTH * 0.03)
@@ -4965,10 +5006,10 @@ class SNfetchDashboard:
             pygame.draw.rect(lt_surf, NORD8, (0, 0, 5, lt_h), border_top_left_radius=12, border_bottom_left_radius=12)
             self.screen.blit(lt_surf, (lt_x, lt_y))
 
-            lt_artist_surf = self._render_cached_text(artist, 16, bold=True, color=NORD6)
+            lt_artist_surf = self._render_cached_text(disp_artist, 16, bold=True, color=NORD6)
             self.screen.blit(lt_artist_surf, (lt_x + 16, lt_y + 8))
 
-            lt_title_surf = self._render_cached_text(f"{title} • Television Broadcast", 13, bold=True, color=NORD8)
+            lt_title_surf = self._render_cached_text(f"{disp_title} • Television Broadcast", 13, bold=True, color=NORD8)
             self.screen.blit(lt_title_surf, (lt_x + 16, lt_y + 32))
 
         # Auto-hide overlay check after 3.5s of inactivity
@@ -5016,6 +5057,9 @@ class SNfetchDashboard:
 
         elif idx == 1:
             # Previous Track
+            if self.is_station_drop:
+                self.is_station_drop = False
+            self.station_mgr.increment_counter()
             self.current_idx = self.shuffle_mgr.step_prev()
             if self.state == STATE_RADIO:
                 self.trigger_play_track_async(self.current_idx)
@@ -5047,6 +5091,8 @@ class SNfetchDashboard:
 
         elif idx == 3:
             # Next Track (increments station jingle counter!)
+            if self.is_station_drop:
+                self.is_station_drop = False
             self.station_mgr.increment_counter()
             self.current_idx = self.shuffle_mgr.advance_next()
             if self.state == STATE_RADIO:
@@ -5716,12 +5762,17 @@ class SNfetchDashboard:
             elif key == pygame.K_y:
                 self._trigger_cockpit_action(4)
             elif key == pygame.K_UP:
+                if self.is_station_drop:
+                    self.is_station_drop = False
+                self.station_mgr.increment_counter()
                 self.current_idx = self.shuffle_mgr.step_prev()
                 if self.platform.is_pc:
                     self.trigger_play_tv_track_async(self.current_idx)
                 else:
                     self._update_quote()
             elif key == pygame.K_DOWN:
+                if self.is_station_drop:
+                    self.is_station_drop = False
                 self.station_mgr.increment_counter()
                 self.current_idx = self.shuffle_mgr.advance_next()
                 if self.platform.is_pc:
