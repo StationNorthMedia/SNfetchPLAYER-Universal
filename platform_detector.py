@@ -59,8 +59,24 @@ class PlatformProfile:
         self.has_wifi_sysfs: bool = os.path.exists("/sys/class/net/wlan0/operstate")
 
         # 4. Dependency Loading Strategy
-        # WICHTIG: pylib/ (ARM64 Binaries) darf NUR auf aarch64 Handhelds geladen werden, NIEMALS auf x86_64 PC!
-        self.should_use_bundled_pylib: bool = self.is_handheld and (self.arch in ("aarch64", "arm64"))
+        # WICHTIG: pylib/ enthält C-Extensions (.so) speziell für Python 3.11 auf aarch64.
+        # Wenn das System bereits ein funktionierendes Pygame hat (wie dArkOS mit Python 3.13)
+        # ODER die Python-Version nicht 3.11 ist, DARF pylib/ NICHT geladen werden,
+        # da Python 3.13 sonst versucht, inkompatible cpython-311 .so Module zu laden (ModuleNotFoundError: No module named 'pygame.base').
+        has_system_pygame = False
+        try:
+            import pygame
+            has_system_pygame = True
+        except Exception:
+            pass
+
+        is_py311 = sys.version_info[:2] == (3, 11)
+        self.should_use_bundled_pylib: bool = (
+            self.is_handheld and 
+            (self.arch in ("aarch64", "arm64")) and 
+            is_py311 and 
+            not has_system_pygame
+        )
 
         # 5. Display Mode
         # SN_WINDOWED erzwingt Fenster (z.B. in run_on_pc.sh)
