@@ -1273,6 +1273,9 @@ class SNfetchDashboard:
                 self.tv_playlist_idx = i
                 break
 
+        # Load Persistent User Settings (overrides defaults if settings.json exists)
+        self._load_settings()
+
         # Quotes / Lore & Aurora Styling
         self.quotes: List[Dict[str, Any]] = []
         self.current_quote: str = "The lights are low, the bass is heavy. Station North."
@@ -1402,9 +1405,9 @@ class SNfetchDashboard:
         return cls._mpv_functional
 
     def _detect_ffmpeg_audio_sink(self) -> List[str]:
-        # Native direct ALSA audio output for dArkOS & ArkOS (RK3326)
-        logging.info("Audio Sink: Native ALSA default configured.")
-        return ["-f", "alsa", "default"]
+        # Native direct ALSA audio output for dArkOS & ArkOS (RK3326) with explicit s16le PCM stereo formatting
+        logging.info("Audio Sink: Native ALSA default configured (pcm_s16le, 44.1kHz, stereo).")
+        return ["-c:a:0", "pcm_s16le", "-ar", "44100", "-ac", "2", "-f", "alsa", "default"]
 
     @property
     def audio_env(self) -> Dict[str, str]:
@@ -2693,7 +2696,12 @@ class SNfetchDashboard:
                     self.current_idx = idx
                     self.cursor_idx = idx
 
-                    if (self.platform.audio_pipeline in (AudioPipeline.FFMPEG_STDOUT_SPLIT, AudioPipeline.ALSA_DIRECT) or shutil.which("ffmpeg")) and shutil.which("ffmpeg"):
+                    if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP:
+                        # ROCKNIX: PipeWire / PulseAudio via MPV
+                        cmd = ["mpv", "--ao=pulse,alsa", "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", str(jingle_path)]
+                        stdout_mode = subprocess.DEVNULL
+                    elif shutil.which("ffmpeg"):
+                        # dArkOS / ArkOS / PC: FFMPEG direct stream
                         cmd = [
                             "ffmpeg", "-y",
                             "-i", str(jingle_path),
@@ -2703,8 +2711,7 @@ class SNfetchDashboard:
                         ]
                         stdout_mode = subprocess.PIPE
                     elif self._is_mpv_functional():
-                        ao_arg = "--ao=pulse,alsa" if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP else "--ao=alsa"
-                        cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", str(jingle_path)]
+                        cmd = ["mpv", "--ao=alsa", "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", str(jingle_path)]
                         stdout_mode = subprocess.DEVNULL
                     elif shutil.which("ffplay"):
                         cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", str(jingle_path)]
@@ -2783,7 +2790,12 @@ class SNfetchDashboard:
                 self.cursor_idx = idx
                 self._update_quote()
 
-                if (self.platform.audio_pipeline in (AudioPipeline.FFMPEG_STDOUT_SPLIT, AudioPipeline.ALSA_DIRECT) or shutil.which("ffmpeg")) and shutil.which("ffmpeg"):
+                if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP:
+                    # ROCKNIX: PipeWire / PulseAudio via MPV
+                    cmd = ["mpv", "--ao=pulse,alsa", "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", stream_url]
+                    stdout_mode = subprocess.DEVNULL
+                elif shutil.which("ffmpeg"):
+                    # dArkOS / ArkOS / PC: FFMPEG direct stream
                     reconnect_args = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"] if str(stream_url).startswith("http") else []
                     cmd = [
                         "ffmpeg", "-y",
@@ -2795,8 +2807,7 @@ class SNfetchDashboard:
                     ]
                     stdout_mode = subprocess.PIPE
                 elif self._is_mpv_functional():
-                    ao_arg = "--ao=pulse,alsa" if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP else "--ao=alsa"
-                    cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", stream_url]
+                    cmd = ["mpv", "--ao=alsa", "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", stream_url]
                     stdout_mode = subprocess.DEVNULL
                 elif shutil.which("ffplay"):
                     cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", stream_url]
@@ -3173,8 +3184,17 @@ class SNfetchDashboard:
                     time.sleep(2.0)
                     return
             else:
-                # Handheld (dArkOS / ROCKNIX / ArkOS)
-                player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if self._is_mpv_functional() else None)
+                # Handheld (ROCKNIX / dArkOS / ArkOS)
+                if self.platform.platform_type == PlatformType.ROCKNIX:
+                    # ROCKNIX uses Wayland: MPV with wlshm is mandatory (ffplay fails)
+                    player_bin = "mpv" if self._is_mpv_functional() else ("ffplay" if shutil.which("ffplay") else None)
+                elif self.platform.platform_type == PlatformType.DARKOS:
+                    # dArkOS has broken mpv libgbm symbol: ffplay is mandatory
+                    player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if self._is_mpv_functional() else None)
+                else:
+                    # ArkOS / Other: MPV preferred with fallback to ffplay
+                    player_bin = "mpv" if self._is_mpv_functional() else ("ffplay" if shutil.which("ffplay") else None)
+
                 if not player_bin:
                     logging.error("Neither ffplay nor mpv found on device.")
                     self.show_loading_screen("VIDEO PLAYER NOT FOUND", "Install ffplay or mpv for video playback")
@@ -3473,6 +3493,7 @@ class SNfetchDashboard:
                                                     break
                                                 elif clicked_button == 4:
                                                     self.shuffle_mgr.toggle_repeat()
+                                                    self._save_settings()
                                                     _push_overlay()
                         except Exception:
                             pass
@@ -3519,6 +3540,7 @@ class SNfetchDashboard:
                                 break
                             elif ev_code in (307, 33, 308, 21):
                                 self.shuffle_mgr.toggle_repeat()
+                                self._save_settings()
                         elif ev_type == 3 and ev_code in (0, 16):
                             if ev_val > 18000:
                                 if is_paused:
@@ -3659,7 +3681,13 @@ class SNfetchDashboard:
             f"[main][logo] overlay=main_w-overlay_w-30:main_h-overlay_h-26"
         )
 
-        player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if self._is_mpv_functional() else None)
+        if self.platform.platform_type == PlatformType.ROCKNIX:
+            player_bin = "mpv" if self._is_mpv_functional() else ("ffplay" if shutil.which("ffplay") else None)
+        elif self.platform.platform_type == PlatformType.DARKOS:
+            player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if self._is_mpv_functional() else None)
+        else:
+            player_bin = "mpv" if self._is_mpv_functional() else ("ffplay" if shutil.which("ffplay") else None)
+
         if not player_bin:
             logging.warning("Video player not found for TV station ID.")
             return True
@@ -5106,6 +5134,7 @@ class SNfetchDashboard:
         elif idx == 4:
             # Repeat Loop Toggle
             self.shuffle_mgr.toggle_repeat()
+            self._save_settings()
 
     # =========================================================================
     # RENDERER 5: THE CHRONICLES (AUDIO-BOX LINKS UNTER BILD, TEXT RECHTS)
@@ -6224,7 +6253,57 @@ class SNfetchDashboard:
         pygame.quit()
         sys.exit(0)
 
-    # --- SETTINGS LOGIC ---
+    # --- SETTINGS PERSISTENCE & LOGIC ---
+    def _save_settings(self):
+        try:
+            settings_path = APP_DIR / "settings.json"
+            data = {
+                "radio_playlist_idx": self.radio_playlist_idx,
+                "tv_playlist_idx": self.tv_playlist_idx,
+                "rotation_interval": self.station_mgr.rotation_interval,
+                "is_repeat_mode": self.shuffle_mgr.is_repeat_mode,
+                "master_volume": self.hardware.get_master_volume(),
+                "brightness": self.hardware.get_brightness()
+            }
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            logging.info("Settings saved successfully to settings.json")
+        except Exception as e:
+            logging.warning(f"Could not save settings: {e}")
+
+    def _load_settings(self):
+        try:
+            settings_path = APP_DIR / "settings.json"
+            if not settings_path.exists():
+                return
+            with open(settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "radio_playlist_idx" in data and self.available_playlists:
+                idx = int(data["radio_playlist_idx"])
+                if 0 <= idx < len(self.available_playlists):
+                    self.radio_playlist_idx = idx
+            if "tv_playlist_idx" in data and self.available_playlists:
+                idx = int(data["tv_playlist_idx"])
+                if 0 <= idx < len(self.available_playlists):
+                    self.tv_playlist_idx = idx
+            if "rotation_interval" in data:
+                self.station_mgr.rotation_interval = int(data["rotation_interval"])
+            if "is_repeat_mode" in data:
+                self.shuffle_mgr.is_repeat_mode = bool(data["is_repeat_mode"])
+            if "master_volume" in data:
+                try:
+                    self.hardware.set_master_volume(int(data["master_volume"]))
+                except Exception:
+                    pass
+            if "brightness" in data:
+                try:
+                    self.hardware.set_brightness(int(data["brightness"]))
+                except Exception:
+                    pass
+            logging.info("Settings loaded successfully from settings.json")
+        except Exception as e:
+            logging.warning(f"Could not load settings: {e}")
+
     def _adjust_setting(self, delta: int):
         if self.settings_cursor == 0:
             if self.available_playlists:
@@ -6244,10 +6323,12 @@ class SNfetchDashboard:
         elif self.settings_cursor == 5:
             curr_b = self.hardware.get_brightness()
             self.hardware.set_brightness(curr_b + delta * 5)
+        self._save_settings()
 
     def _execute_setting_action(self):
         if self.settings_cursor == 3:
             rep = self.shuffle_mgr.toggle_repeat()
+            self._save_settings()
             self.settings_feedback_msg = f"Single-Track Repeat Loop: {'ON' if rep else 'OFF'}"
             self.settings_feedback_time = time.time()
         elif self.settings_cursor == 6:

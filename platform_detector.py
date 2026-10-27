@@ -21,18 +21,21 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+import glob
+
 class PlatformType(Enum):
-    ROCKNIX_DARKOS = "ROCKNIX / dArkOS (RK3326 / SquashFS ro)"
-    ARKOS          = "ArkOS (Ubuntu-base / ext4 rw)"
-    EMUELEC        = "EmuELEC (Buildroot / ro)"
-    PC_ARCH_MANJARO= "PC Desktop (Arch / Manjaro Linux)"
+    ROCKNIX         = "ROCKNIX (RK3326 / SquashFS ro / Wayland + PipeWire)"
+    DARKOS          = "dArkOS (RK3326 / Debian trixie / Direct ALSA)"
+    ARKOS           = "ArkOS (Ubuntu-base / ext4 rw / Direct ALSA)"
+    EMUELEC         = "EmuELEC (Buildroot / ro)"
+    PC_ARCH_MANJARO = "PC Desktop (Arch / Manjaro Linux)"
     PC_DEBIAN_UBUNTU= "PC Desktop (Debian / Ubuntu / Mint)"
-    PC_GENERIC     = "PC Desktop (Generic Linux / Other)"
+    PC_GENERIC      = "PC Desktop (Generic Linux / Other)"
 
 class AudioPipeline(Enum):
-    MPV_PAREC_TAP       = "mpv_pulse_with_parec_tap"       # ROCKNIX / dArkOS
+    MPV_PAREC_TAP       = "mpv_pulse_with_parec_tap"       # ROCKNIX (Wayland + PipeWire)
     ALSA_DIRECT         = "alsa_direct"                    # ArkOS / EmuELEC
-    FFMPEG_STDOUT_SPLIT = "ffmpeg_stdout_split"            # Desktop PC (Linux/Arch/Ubuntu)
+    FFMPEG_STDOUT_SPLIT = "ffmpeg_stdout_split"            # dArkOS / Desktop PC (Direct ALSA/PCM)
 
 class PlatformProfile:
     def __init__(self):
@@ -44,7 +47,8 @@ class PlatformProfile:
         # 1. Hardware & Platform Category
         self.platform_type: PlatformType = self._detect_platform_type()
         self.is_handheld: bool = self.platform_type in (
-            PlatformType.ROCKNIX_DARKOS,
+            PlatformType.ROCKNIX,
+            PlatformType.DARKOS,
             PlatformType.ARKOS,
             PlatformType.EMUELEC
         )
@@ -59,10 +63,6 @@ class PlatformProfile:
         self.has_wifi_sysfs: bool = os.path.exists("/sys/class/net/wlan0/operstate")
 
         # 4. Dependency Loading Strategy
-        # WICHTIG: pylib/ enthält C-Extensions (.so) speziell für Python 3.11 auf aarch64.
-        # Wenn das System bereits ein funktionierendes Pygame hat (wie dArkOS mit Python 3.13)
-        # ODER die Python-Version nicht 3.11 ist, DARF pylib/ NICHT geladen werden,
-        # da Python 3.13 sonst versucht, inkompatible cpython-311 .so Module zu laden (ModuleNotFoundError: No module named 'pygame.base').
         has_system_pygame = False
         try:
             import pygame
@@ -79,7 +79,6 @@ class PlatformProfile:
         )
 
         # 5. Display Mode
-        # SN_WINDOWED erzwingt Fenster (z.B. in run_on_pc.sh)
         force_windowed = os.environ.get("SN_WINDOWED", "0") == "1"
         self.is_windowed: bool = force_windowed or self.is_pc
 
@@ -114,18 +113,42 @@ class PlatformProfile:
         return False
 
     def _detect_platform_type(self) -> PlatformType:
+        # A) Desktop PC check based on CPU architecture
+        if self.arch in ("x86_64", "amd64", "i386"):
+            distro_id = self.os_release.get("ID", "").lower()
+            id_like = self.os_release.get("ID_LIKE", "").lower()
+            if distro_id in ("manjaro", "arch") or "arch" in id_like:
+                return PlatformType.PC_ARCH_MANJARO
+            elif distro_id in ("ubuntu", "debian", "linuxmint", "pop") or "debian" in id_like:
+                return PlatformType.PC_DEBIAN_UBUNTU
+            return PlatformType.PC_GENERIC
+
         os_name = self.os_release.get("OS_NAME", "").upper()
+        pretty_name = self.os_release.get("PRETTY_NAME", "").upper()
         distro_id = self.os_release.get("ID", "").lower()
         id_like = self.os_release.get("ID_LIKE", "").lower()
         hw_device = self.os_release.get("HW_DEVICE", "").upper()
 
-        # A) ROCKNIX / dArkOS
-        if self.cfw_name == "ROCKNIX" or os_name == "ROCKNIX" or hw_device == "RK3326":
-            return PlatformType.ROCKNIX_DARKOS
-        if os.path.exists("/sys/devices/platform/joypad") and os.path.exists("/sys/bus/iio/devices/iio:device0"):
-            return PlatformType.ROCKNIX_DARKOS
+        # B) ROCKNIX: Buildroot SquashFS with Wayland/Weston/Sway & PipeWire
+        is_sway = os.path.exists("/storage/.config/sway") or bool(os.environ.get("SWAYSOCK")) or bool(os.environ.get("WAYLAND_DISPLAY"))
+        if self.cfw_name == "ROCKNIX" or "ROCKNIX" in os_name or "ROCKNIX" in pretty_name or distro_id == "rocknix":
+            return PlatformType.ROCKNIX
+        if self.is_immutable_root and is_sway:
+            return PlatformType.ROCKNIX
 
-        # B) ArkOS
+        # C) dArkOS: RK3326 Debian Trixie (Python 3.13), direct KMSDRM ALSA
+        if (any(x in self.cfw_name for x in ("DARKOS", "DARKOS4CLONE", "DARKOSRE")) or
+            "DARKOS" in os_name or "DARKOS" in pretty_name or
+            os.path.exists("/opt/system/Tools/PortMaster/mod_dArkOS.txt") or
+            os.path.exists("/opt/system/Tools/PortMaster/mod_dArkOSRE.txt") or
+            os.path.exists("/etc/device_info_darkos.env") or
+            bool(glob.glob("/opt/system/Tools/PortMaster/device_info_darkos*.env"))):
+            return PlatformType.DARKOS
+
+        if self.arch in ("aarch64", "arm64") and distro_id == "debian" and not self.is_immutable_root:
+            return PlatformType.DARKOS
+
+        # D) ArkOS: Ubuntu 19.10/20.04
         if self.cfw_name == "ARKOS" or os.path.exists("/usr/share/plymouth/themes/text.plymouth"):
             try:
                 with open("/usr/share/plymouth/themes/text.plymouth", "r") as pf:
@@ -136,36 +159,29 @@ class PlatformProfile:
         if self.arch in ("aarch64", "armhf") and distro_id == "ubuntu" and not self.is_immutable_root:
             return PlatformType.ARKOS
 
-        # C) EmuELEC
+        # E) EmuELEC
         if self.cfw_name == "EMUELEC" or distro_id == "emuelec" or "emuelec" in os_name.lower():
             return PlatformType.EMUELEC
 
-        # D) Desktop PC (x86_64 oder generisches Linux)
-        if distro_id in ("manjaro", "arch") or "arch" in id_like:
-            return PlatformType.PC_ARCH_MANJARO
-        elif distro_id in ("ubuntu", "debian", "linuxmint", "pop") or "debian" in id_like:
-            return PlatformType.PC_DEBIAN_UBUNTU
-        elif self.arch in ("x86_64", "amd64", "i386"):
-            return PlatformType.PC_GENERIC
-
         # Fallback Handheld wenn Controller-Device existiert
-        if os.path.exists("/dev/input/by-path/platform-joypad-event-joystick"):
-            return PlatformType.ROCKNIX_DARKOS
+        if os.path.exists("/dev/input/by-path/platform-joypad-event-joystick") or os.path.exists("/sys/devices/platform/joypad"):
+            if is_sway or self.is_immutable_root:
+                return PlatformType.ROCKNIX
+            return PlatformType.DARKOS
 
         return PlatformType.PC_GENERIC
 
     def _detect_audio_pipeline(self) -> AudioPipeline:
-        # ROCKNIX mit PipeWire nutzt mpv + parec PipeWire-Tap wenn parec vorhanden ist
-        if self.platform_type == PlatformType.ROCKNIX_DARKOS and shutil.which("parec"):
+        # ROCKNIX mit PipeWire: Strikt MPV_PAREC_TAP (kein direktes ALSA!)
+        if self.platform_type == PlatformType.ROCKNIX:
             return AudioPipeline.MPV_PAREC_TAP
 
-        # Auf allen Systemen mit ffmpeg (PC, ArkOS, dArkOS, EmuELEC) ist FFMPEG_STDOUT_SPLIT
-        # die Standard-Pipeline: direkte Audio-Ausgabe + PCM-Stream für den Visualizer
+        # dArkOS, ArkOS & PC: Standard ist direkter FFMPEG Split (sauberer 16-Bit PCM Stream)
         if shutil.which("ffmpeg"):
             return AudioPipeline.FFMPEG_STDOUT_SPLIT
 
         # Fallback wenn kein ffmpeg vorhanden ist
-        if self.platform_type in (PlatformType.ARKOS, PlatformType.EMUELEC):
+        if self.platform_type in (PlatformType.ARKOS, PlatformType.DARKOS, PlatformType.EMUELEC):
             return AudioPipeline.ALSA_DIRECT
 
         if shutil.which("parec"):

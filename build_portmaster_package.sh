@@ -14,11 +14,9 @@ echo "=========================================================="
 rm -rf "$STAGING_DIR" "$DIST_DIR/snfetchplayer.zip"
 mkdir -p "$PKG_DIR" "$PKG_DIR/playlists" "$PKG_DIR/thumbnails"
 
-# 2. PortMaster & PC Starter Root-Dateien
+# 2. PortMaster Root-Dateien
 cp "$SCRIPT_DIR/SNfetchPLAYER.sh" "$STAGING_DIR/"
 chmod +x "$STAGING_DIR/SNfetchPLAYER.sh"
-cp "$SCRIPT_DIR/run_on_pc.sh" "$STAGING_DIR/"
-chmod +x "$STAGING_DIR/run_on_pc.sh"
 
 # 3. Anwendungsdateien kopieren
 cp "$SCRIPT_DIR/player.py" "$PKG_DIR/"
