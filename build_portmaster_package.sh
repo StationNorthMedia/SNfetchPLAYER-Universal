@@ -14,13 +14,16 @@ echo "=========================================================="
 rm -rf "$STAGING_DIR" "$DIST_DIR/snfetchplayer.zip"
 mkdir -p "$PKG_DIR" "$PKG_DIR/playlists" "$PKG_DIR/thumbnails"
 
-# 2. PortMaster Root-Dateien
+# 2. PortMaster & PC Starter Root-Dateien
 cp "$SCRIPT_DIR/SNfetchPLAYER.sh" "$STAGING_DIR/"
 chmod +x "$STAGING_DIR/SNfetchPLAYER.sh"
+cp "$SCRIPT_DIR/run_on_pc.sh" "$STAGING_DIR/"
+chmod +x "$STAGING_DIR/run_on_pc.sh"
 
 # 3. Anwendungsdateien kopieren
 cp "$SCRIPT_DIR/player.py" "$PKG_DIR/"
 cp "$SCRIPT_DIR/ui_dashboard.py" "$PKG_DIR/"
+cp "$SCRIPT_DIR/run_on_pc.sh" "$PKG_DIR/"
 cp "$SCRIPT_DIR/extractor.py" "$PKG_DIR/"
 cp "$SCRIPT_DIR/osd_generator.py" "$PKG_DIR/"
 cp "$SCRIPT_DIR/platform_detector.py" "$PKG_DIR/"
@@ -33,7 +36,7 @@ cp "$SCRIPT_DIR/port.json" "$PKG_DIR/"
 cp "$SCRIPT_DIR/gameinfo.xml" "$PKG_DIR/"
 cp "$SCRIPT_DIR/screenshot.png" "$PKG_DIR/"
 cp "$SCRIPT_DIR/cover.png" "$PKG_DIR/"
-chmod +x "$PKG_DIR"/*.py
+chmod +x "$PKG_DIR"/*.py "$PKG_DIR"/*.sh
 
 # 4. Playlists, Music, Videos & Manifest kopieren
 cp -r "$SCRIPT_DIR/playlists/"* "$PKG_DIR/playlists/"

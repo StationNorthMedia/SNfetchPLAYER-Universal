@@ -1,5 +1,0 @@
-RELEASE_ORG="PortsMaster"
-RELEASE_REPO="PortMaster-New"
-REPO_NAME="PortMaster New Repo."
-REPO_PREFIX="pm"
-SPLIT_IMAGES="N"

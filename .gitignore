@@ -24,3 +24,9 @@ ports/
 releases/
 .hash_cache
 shuffle_state.json
+
+# Internal developer notes and scripts
+BUG_TRACKER.md
+DESIGN_IDEAS.md
+publish_to_github.sh
+SOURCE_SETUP.txt

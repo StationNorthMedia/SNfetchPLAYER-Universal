@@ -18,6 +18,11 @@ NORD11='\033[38;2;191;97;106m'   # Aurora Red
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# If player.py is not in current directory, check if we are in an unzipped PortMaster root
+if [ ! -f "player.py" ] && [ -f "snfetchplayer/player.py" ]; then
+    cd snfetchplayer
+fi
+
 echo -e "${NORD8}${BOLD}========================================================================${NC}"
 echo -e "${NORD8}${BOLD}   👑 STATION NORTH • SNfetchPLAYER PC SUITE LAUNCHER v7.0            ${NC}"
 echo -e "${NORD9}      The Sovereign Cyberdeck & Retro Media Suite (PC Mode)            ${NC}"
