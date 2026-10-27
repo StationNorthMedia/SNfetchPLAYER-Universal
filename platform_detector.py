@@ -155,15 +155,16 @@ class PlatformProfile:
         return PlatformType.PC_GENERIC
 
     def _detect_audio_pipeline(self) -> AudioPipeline:
-        # ROCKNIX / dArkOS nutzt mpv + parec PipeWire-Tap
-        if self.platform_type == PlatformType.ROCKNIX_DARKOS:
+        # ROCKNIX mit PipeWire nutzt mpv + parec PipeWire-Tap wenn parec vorhanden ist
+        if self.platform_type == PlatformType.ROCKNIX_DARKOS and shutil.which("parec"):
             return AudioPipeline.MPV_PAREC_TAP
 
-        # Auf dem PC bevorzugen wir System-FFmpeg mit Stereo-Split
-        if self.is_pc and shutil.which("ffmpeg"):
+        # Auf allen Systemen mit ffmpeg (PC, ArkOS, dArkOS, EmuELEC) ist FFMPEG_STDOUT_SPLIT
+        # die Standard-Pipeline: direkte Audio-Ausgabe + PCM-Stream für den Visualizer
+        if shutil.which("ffmpeg"):
             return AudioPipeline.FFMPEG_STDOUT_SPLIT
 
-        # ArkOS und EmuELEC haben echtes, direktes ALSA
+        # Fallback wenn kein ffmpeg vorhanden ist
         if self.platform_type in (PlatformType.ARKOS, PlatformType.EMUELEC):
             return AudioPipeline.ALSA_DIRECT
 

@@ -1383,6 +1383,22 @@ class SNfetchDashboard:
         if init_pct >= 99.0:
             self.sync_completed_timestamp = time.time()
 
+    _mpv_functional: Optional[bool] = None
+
+    @classmethod
+    def _is_mpv_functional(cls) -> bool:
+        if cls._mpv_functional is not None:
+            return cls._mpv_functional
+        if not shutil.which("mpv"):
+            cls._mpv_functional = False
+            return False
+        try:
+            res = subprocess.run(["mpv", "--version"], capture_output=True, timeout=1.0)
+            cls._mpv_functional = (res.returncode == 0)
+        except Exception:
+            cls._mpv_functional = False
+        return cls._mpv_functional
+
     def _detect_ffmpeg_audio_sink(self) -> List[str]:
         # Native direct ALSA audio output for dArkOS & ArkOS (RK3326)
         logging.info("Audio Sink: Native ALSA default configured.")
@@ -2661,7 +2677,7 @@ class SNfetchDashboard:
                     self.current_idx = idx
                     self.cursor_idx = idx
 
-                    if self.platform.audio_pipeline == AudioPipeline.FFMPEG_STDOUT_SPLIT and shutil.which("ffmpeg"):
+                    if (self.platform.audio_pipeline in (AudioPipeline.FFMPEG_STDOUT_SPLIT, AudioPipeline.ALSA_DIRECT) or shutil.which("ffmpeg")) and shutil.which("ffmpeg"):
                         cmd = [
                             "ffmpeg", "-y",
                             "-i", str(jingle_path),
@@ -2670,9 +2686,12 @@ class SNfetchDashboard:
                             "-map", "[out2]", "-flush_packets", "1", "-f", "s16le", "-ac", "1", "-ar", "22050", "-"
                         ]
                         stdout_mode = subprocess.PIPE
-                    elif shutil.which("mpv"):
+                    elif self._is_mpv_functional():
                         ao_arg = "--ao=pulse,alsa" if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP else "--ao=alsa"
                         cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", str(jingle_path)]
+                        stdout_mode = subprocess.DEVNULL
+                    elif shutil.which("ffplay"):
+                        cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", str(jingle_path)]
                         stdout_mode = subprocess.DEVNULL
                     else:
                         cmd = ["aplay", "-q", str(jingle_path)]
@@ -2747,7 +2766,7 @@ class SNfetchDashboard:
                 self.cursor_idx = idx
                 self._update_quote()
 
-                if self.platform.audio_pipeline == AudioPipeline.FFMPEG_STDOUT_SPLIT and shutil.which("ffmpeg"):
+                if (self.platform.audio_pipeline in (AudioPipeline.FFMPEG_STDOUT_SPLIT, AudioPipeline.ALSA_DIRECT) or shutil.which("ffmpeg")) and shutil.which("ffmpeg"):
                     reconnect_args = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"] if str(stream_url).startswith("http") else []
                     cmd = [
                         "ffmpeg", "-y",
@@ -2758,9 +2777,12 @@ class SNfetchDashboard:
                         "-map", "[out2]", "-flush_packets", "1", "-f", "s16le", "-ac", "1", "-ar", "22050", "-"
                     ]
                     stdout_mode = subprocess.PIPE
-                elif shutil.which("mpv"):
+                elif self._is_mpv_functional():
                     ao_arg = "--ao=pulse,alsa" if self.platform.audio_pipeline == AudioPipeline.MPV_PAREC_TAP else "--ao=alsa"
                     cmd = ["mpv", ao_arg, "--no-video", "--no-terminal", "--audio-buffer=0.08", "--audio-fallback-to-null=yes", stream_url]
+                    stdout_mode = subprocess.DEVNULL
+                elif shutil.which("ffplay"):
+                    cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", stream_url]
                     stdout_mode = subprocess.DEVNULL
                 else:
                     cmd = ["aplay", "-q", stream_url]
@@ -3115,7 +3137,7 @@ class SNfetchDashboard:
                     return
             else:
                 # Handheld (dArkOS / ROCKNIX / ArkOS)
-                player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if shutil.which("mpv") else None)
+                player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if self._is_mpv_functional() else None)
                 if not player_bin:
                     logging.error("Neither ffplay nor mpv found on device.")
                     self.show_loading_screen("VIDEO PLAYER NOT FOUND", "Install ffplay or mpv for video playback")
@@ -3179,10 +3201,16 @@ class SNfetchDashboard:
                     proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
 
                     def _sway_focus():
+                        sway_bin = shutil.which("swaymsg")
+                        if not sway_bin or not os.environ.get("SWAYSOCK") or not os.path.exists(os.environ.get("SWAYSOCK")):
+                            return
                         time.sleep(0.15)
                         for _ in range(5):
-                            subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
-                            subprocess.run(["swaymsg", '[class="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
+                            try:
+                                subprocess.run([sway_bin, '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
+                                subprocess.run([sway_bin, '[class="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
+                            except Exception:
+                                break
                             time.sleep(0.2)
                     threading.Thread(target=_sway_focus, daemon=True).start()
 
@@ -3594,7 +3622,7 @@ class SNfetchDashboard:
             f"[main][logo] overlay=main_w-overlay_w-30:main_h-overlay_h-26"
         )
 
-        player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if shutil.which("mpv") else None)
+        player_bin = "ffplay" if shutil.which("ffplay") else ("mpv" if self._is_mpv_functional() else None)
         if not player_bin:
             logging.warning("Video player not found for TV station ID.")
             return True
@@ -3645,9 +3673,15 @@ class SNfetchDashboard:
             proc = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
 
             def _sway_focus_id():
+                sway_bin = shutil.which("swaymsg")
+                if not sway_bin or not os.environ.get("SWAYSOCK") or not os.path.exists(os.environ.get("SWAYSOCK")):
+                    return
                 time.sleep(0.15)
                 for _ in range(5):
-                    subprocess.run(["swaymsg", '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
+                    try:
+                        subprocess.run([sway_bin, '[app_id="mpv"] move to output DSI-1, fullscreen enable, focus'], capture_output=True, env=env)
+                    except Exception:
+                        break
                     time.sleep(0.2)
             threading.Thread(target=_sway_focus_id, daemon=True).start()
         except Exception as e:
@@ -3739,16 +3773,21 @@ class SNfetchDashboard:
             self.stop_audio()
             self.stop_chronicles_audio()
             try:
-                if shutil.which("mpv"):
-                    cmd = ["mpv", "--ao=pulse,alsa", "--no-video", "--really-quiet", "--no-terminal", str(target_path)]
-                    self.chronicles_proc = subprocess.Popen(cmd, env=self.audio_env)
-                    self.chronicles_playing = True
-                    logging.info(f"Chronicles playback started with mpv: {target_path.name}")
-                elif shutil.which("ffplay"):
+                if shutil.which("ffplay"):
                     cmd = ["ffplay", "-nodisp", "-autoexit", "-loglevel", "error", str(target_path)]
                     self.chronicles_proc = subprocess.Popen(cmd)
                     self.chronicles_playing = True
                     logging.info(f"Chronicles playback started with ffplay: {target_path.name}")
+                elif self._is_mpv_functional():
+                    cmd = ["mpv", "--ao=pulse,alsa", "--no-video", "--really-quiet", "--no-terminal", str(target_path)]
+                    self.chronicles_proc = subprocess.Popen(cmd, env=self.audio_env)
+                    self.chronicles_playing = True
+                    logging.info(f"Chronicles playback started with mpv: {target_path.name}")
+                elif shutil.which("aplay"):
+                    cmd = ["aplay", "-q", str(target_path)]
+                    self.chronicles_proc = subprocess.Popen(cmd)
+                    self.chronicles_playing = True
+                    logging.info(f"Chronicles playback started with aplay: {target_path.name}")
             except Exception as sub_err:
                 logging.error(f"Narration playback error: {sub_err}")
         else:
