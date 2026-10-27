@@ -63,6 +63,10 @@ if [ -d "$SCRIPT_DIR/assets/ui" ]; then
   mkdir -p "$PKG_DIR/assets/ui"
   cp -r "$SCRIPT_DIR/assets/ui/"* "$PKG_DIR/assets/ui/"
 fi
+if [ -d "$SCRIPT_DIR/assets/backgrounds" ]; then
+  mkdir -p "$PKG_DIR/assets/backgrounds"
+  cp -r "$SCRIPT_DIR/assets/backgrounds/"* "$PKG_DIR/assets/backgrounds/"
+fi
 if [ -f "$SCRIPT_DIR/assets/catalog_manifest.json" ]; then
   cp "$SCRIPT_DIR/assets/catalog_manifest.json" "$PKG_DIR/assets/"
 fi

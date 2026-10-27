@@ -1776,21 +1776,20 @@ class SNfetchDashboard:
             Path("assets/backgrounds")
         ]
         found_imgs = []
+        found_stems = set()
         for bd in bg_dirs:
             if bd.exists():
                 for p in sorted(bd.glob("*.*")):
                     if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
-                        try:
-                            rp = p.resolve()
-                            if rp not in [f.resolve() for f in found_imgs]:
-                                found_imgs.append(p)
-                        except Exception:
-                            if p not in found_imgs:
-                                found_imgs.append(p)
+                        # Deduplicate so we don't load both bg_01.png and bg_01.webp
+                        if p.stem not in found_stems:
+                            found_stems.add(p.stem)
+                            found_imgs.append(p)
 
-        # Fallback to comic cover if no dedicated background image yet
+        # Fallback to comic cover or official artwork if no dedicated background image yet
         if not found_imgs:
-            for cov in [APP_DIR / "assets/comic/Cover_Vol01.webp", Path("assets/comic/Cover_Vol01.webp")]:
+            for cov in [APP_DIR / "assets/comic/Cover_Vol01.webp", Path("assets/comic/Cover_Vol01.webp"),
+                        APP_DIR / "cover.png", Path("cover.png")]:
                 if cov.exists():
                     found_imgs.append(cov)
                     break
@@ -1811,9 +1810,10 @@ class SNfetchDashboard:
                 crop_y = max(0, (nh - box_h) // 2)
                 cropped = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
                 cropped.blit(scaled, (-crop_x, -crop_y))
-                # Apply 84% dark Nord0 tint so quote text is 100% crystal clear and high-contrast
+                # Apply balanced 50% dark Nord0 tint so artwork is vibrant and immediately visible,
+                # while quote text remains 100% crisp and readable
                 dark_tint = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
-                dark_tint.fill((34, 39, 49, 215))
+                dark_tint.fill((34, 39, 49, 130))
                 cropped.blit(dark_tint, (0, 0))
                 # Apply smooth rounded corner mask matching the container's border_radius=16
                 mask = pygame.Surface((box_w, box_h), pygame.SRCALPHA)
@@ -1822,6 +1822,10 @@ class SNfetchDashboard:
                 self.quote_bg_surfaces.append(cropped)
             except Exception as e:
                 logging.debug(f"Could not load quote bg {img_path}: {e}")
+
+        # Pick a random starting image so each launch has a fresh visual experience
+        if self.quote_bg_surfaces:
+            self.current_quote_bg_idx = random.randint(0, len(self.quote_bg_surfaces) - 1)
 
     def _render_wrapped_lines(self, text: str, font: pygame.font.Font, max_w: int) -> List[str]:
         words = text.split(" ")
@@ -2089,6 +2093,7 @@ class SNfetchDashboard:
                 if bundle_downloaded:
                     self.station_mgr._scan_station_assets()
                     self._load_chronicles()
+                    self._load_quote_backgrounds()
                     # Re-check remaining tasks
                     remaining = [t for t in tasks if not t[3].exists() or t[3].stat().st_size == 0]
                     if not remaining:
@@ -2096,6 +2101,7 @@ class SNfetchDashboard:
                         self.sync_pct = 100.0
                         self.sync_status_text = "All Station Assets Synchronized • 100% Ready"
                         self.sync_completed_timestamp = time.time()
+                        self._load_quote_backgrounds()
                         return
                     tasks = remaining
                     total_needed = len(tasks)
@@ -2158,6 +2164,7 @@ class SNfetchDashboard:
             self.sync_completed_timestamp = time.time()
             self.station_mgr._scan_station_assets()
             self._load_chronicles()
+            self._load_quote_backgrounds()
         except Exception as e:
             self.sync_active = False
             self.sync_error = str(e)
